@@ -149,3 +149,4 @@ This simulates a 12.5g print job starting and finishing, demonstrating immediate
 - Original project by **[ryanch](https://github.com/ryanch/openprinttag_scanner)** under MIT License.
 - PN5180 library based on work by **ATrappmann** and **Tueddy**, enhanced for ISO 14443-A block reading.
 - Standard specifications: [OpenSpool](https://github.com/open-spool/openspool-standard) & [OpenPrintTag](https://openprinttag.org).
+- AI-Assisted Development: Built with Gemini.
