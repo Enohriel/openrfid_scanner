@@ -24,3 +24,5 @@ test/integration/scenarios/__pycache__/__init__.cpython-312.pyc
 test/integration/venv/
 test/native/test_json_pull_helpers
 test/native/test_json_pull_helpers_runner
+test/native/*.exe
+test/native/*.txt

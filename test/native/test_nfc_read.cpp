@@ -1,19 +1,12 @@
 // Tests for NFCManager read behavior
 // Build with: cd test/native && make test_nfc_read
-//
-// These tests verify that NFCManager does NOT auto-format blank spools
-// or spools with read errors. Currently expected to FAIL until the
-// behavior is fixed.
 
 #include "platform/NativePlatform.h"
 #include "StubNFCConnection.h"
 #include "FakeLCDManager.h"
 #include "StubApplicationManager.h"
-
-// Include the openprinttag library
-extern "C" {
-#include "openprinttag_lib.h"
-}
+#include "NFCTypes.h"
+#include "OpenSpoolParser.h"
 
 #include <cmath>
 #include <cstdio>
@@ -55,19 +48,6 @@ extern "C" {
 static StubNFCConnection* g_stubNfc = nullptr;
 static LCDManager* g_lcd = nullptr;
 
-static bool loadBinFile(const char* pathA, const char* pathB, uint8_t* out, size_t outSize, size_t* readSize) {
-    FILE* f = fopen(pathA, "rb");
-    if (!f && pathB) {
-        f = fopen(pathB, "rb");
-    }
-    if (!f) {
-        return false;
-    }
-    *readSize = fread(out, 1, outSize, f);
-    fclose(f);
-    return *readSize > 0;
-}
-
 static bool nearlyEqual(float a, float b, float epsilon = 0.0001f) {
     return std::fabs(a - b) <= epsilon;
 }
@@ -97,7 +77,6 @@ void teardown_nfc_test() {
 }
 
 // Test: Blank spool should NOT be automatically formatted
-// EXPECTED TO FAIL with current code (auto-formats blank spools)
 int test_blank_spool_not_formatted() {
     setup_nfc_test();
 
@@ -113,7 +92,6 @@ int test_blank_spool_not_formatted() {
     NFCManager::getInstance().scanOnce();
 
     // Assert: NO writes should occur (blank spools should not be formatted)
-    // This tests the current buggy behavior - should FAIL
     size_t writeCount = g_stubNfc->getPageWrites().size();
     printf("  [DEBUG] Write count: %zu (expected 0)\n", writeCount);
 
@@ -124,7 +102,6 @@ int test_blank_spool_not_formatted() {
 }
 
 // Test: Read error should show LCD error, not attempt formatting
-// EXPECTED TO FAIL with current code (attempts to format on read error)
 int test_read_error_not_formatted() {
     setup_nfc_test();
 
@@ -179,21 +156,29 @@ int test_blank_tag_removal_sends_tag_removed_message() {
     return 0;
 }
 
-// Test: Real OpenPrintTag binary with extra metadata still parses as valid spool
+// Test: Real OpenSpool tag parses as valid spool
 int test_real_spool_bin_parses_as_valid_spool() {
     setup_nfc_test();
 
-    uint8_t spoolData[320] = {0};
-    size_t spoolDataSize = 0;
-    bool loaded = loadBinFile("../res/openprinttag_PETG_Jet_Black.bin",
-                              "test/res/openprinttag_PETG_Jet_Black.bin",
-                              spoolData, sizeof(spoolData), &spoolDataSize);
-    TEST_ASSERT(loaded);
+    OpenSpoolData tag;
+    opt_init(&tag);
+    opt_set_material_type(&tag, OPT_MATERIAL_TYPE_PETG);
+    strncpy(tag.type, "PETG Jet Black", sizeof(tag.type) - 1);
+    const uint8_t petgColor[4] = {0x24, 0x29, 0x2A, 0xFF};
+    opt_set_primary_color(&tag, petgColor);
+    opt_set_brand_name(&tag, "Prusament");
+    opt_set_actual_full_weight(&tag, 1050.0f);
+    tag.remaining_weight = 1050.0f;
+    tag.spoolman_id = 14;
 
-    uint8_t uid[8] = {0x17, 0x5A, 0xEC, 0x18, 0x09, 0x01, 0x04, 0xE0};
+    uint8_t uid[7] = {0x04, 0x5A, 0xEC, 0x18, 0x09, 0x01, 0x04};
     g_stubNfc->setTagPresent(true);
-    g_stubNfc->setTagUid(uid, 8);
-    g_stubNfc->setTagData(spoolData, spoolDataSize);
+    g_stubNfc->setTagUid(uid, 7);
+
+    // Write OpenSpool tag into stub connection
+    bool wrote = OpenSpoolParser::writeToTag(g_stubNfc, &tag);
+    TEST_ASSERT(wrote);
+    g_stubNfc->clearPageWrites(); // Clear writes so we verify scanOnce doesn't write
 
     bool parsed = NFCManager::getInstance().scanOnce();
     TEST_ASSERT(parsed);
@@ -208,7 +193,7 @@ int test_real_spool_bin_parses_as_valid_spool() {
         }
         if (msg.type == AppMessageType::SPOOL_DETECTED) {
             sawSpoolDetected = true;
-            TEST_ASSERT_EQ(strcmp(msg.payload.spoolDetected.spool_id, "175AEC18090104E0"), 0);
+            TEST_ASSERT_EQ(strcmp(msg.payload.spoolDetected.spool_id, "045AEC18090104"), 0);
             TEST_ASSERT_EQ(msg.payload.spoolDetected.material_type, OPT_MATERIAL_TYPE_PETG);
             TEST_ASSERT(nearlyEqual(msg.payload.spoolDetected.kg_remaining, 1.05f));
             TEST_ASSERT_EQ(msg.payload.spoolDetected.primary_color[0], (uint8_t)0x24);
@@ -216,6 +201,7 @@ int test_real_spool_bin_parses_as_valid_spool() {
             TEST_ASSERT_EQ(msg.payload.spoolDetected.primary_color[2], (uint8_t)0x2A);
             TEST_ASSERT_EQ(strcmp(msg.payload.spoolDetected.material_name, "PETG Jet Black"), 0);
             TEST_ASSERT_EQ(strcmp(msg.payload.spoolDetected.manufacturer, "Prusament"), 0);
+            TEST_ASSERT_EQ(msg.payload.spoolDetected.spoolman_id, 14);
             break;
         }
     }
@@ -230,8 +216,7 @@ int test_real_spool_bin_parses_as_valid_spool() {
 int main() {
     int passed = 0, failed = 0, total = 0;
 
-    printf("\n=== NFC Read Behavior Tests ===\n");
-    printf("(These tests are expected to FAIL until auto-format behavior is fixed)\n\n");
+    printf("\n=== NFC Read Behavior Tests ===\n\n");
 
     RUN_TEST(test_blank_spool_not_formatted);
     RUN_TEST(test_read_error_not_formatted);

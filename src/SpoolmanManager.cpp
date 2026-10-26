@@ -7,7 +7,6 @@
 #include <json.hpp>
 
 #include <Arduino.h>
-#include "openprinttag_lib.h"
 
 static constexpr size_t JSON_SMALL_CAPACITY = 256;
 static constexpr size_t JSON_MEDIUM_CAPACITY = 768;
@@ -190,7 +189,9 @@ static bool parseSpoolIdByUuid(const char* jsonText, const char* uuid, int& outI
                         break;
                     }
                     if (reader.node_type() != json_node_type::field) continue;
-                    if (strcmp(reader.value(), "openprinttag_uuid") != 0) continue;
+                    if (strcmp(reader.value(), "openprinttag_uuid") != 0 &&
+                        strcmp(reader.value(), "openrfid_uuid") != 0 &&
+                        strcmp(reader.value(), "openspool_uuid") != 0) continue;
                     if (reader.read()) {
                         readStringValue(reader, tagUuid, sizeof(tagUuid));
                     }
@@ -209,7 +210,9 @@ static bool parseSpoolUuid(const char* jsonText, char* outUuid, size_t outUuidSi
 
     while (reader.read()) {
         if (reader.node_type() != json_node_type::field) continue;
-        if (strcmp(reader.value(), "openprinttag_uuid") != 0) continue;
+        if (strcmp(reader.value(), "openprinttag_uuid") != 0 &&
+            strcmp(reader.value(), "openrfid_uuid") != 0 &&
+            strcmp(reader.value(), "openspool_uuid") != 0) continue;
         if (!reader.read()) return false;
         return readStringValue(reader, outUuid, outUuidSize);
     }
@@ -430,6 +433,8 @@ static int createSpool(int filamentId, const SpoolmanSyncRequest& req) {
     char uuidEscaped[32];
     snprintf(uuidEscaped, sizeof(uuidEscaped), "\"%s\"", req.spool_id);
     doc["extra"]["openprinttag_uuid"] = uuidEscaped;
+    doc["extra"]["openrfid_uuid"] = uuidEscaped;
+    doc["extra"]["openspool_uuid"] = uuidEscaped;
 
     String body;
     serializeJson(doc, body);

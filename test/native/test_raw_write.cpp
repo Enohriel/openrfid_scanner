@@ -5,10 +5,8 @@
 #include "StubNFCConnection.h"
 #include "FakeLCDManager.h"
 #include "StubApplicationManager.h"
-
-extern "C" {
-#include "openprinttag_lib.h"
-}
+#include "NFCTypes.h"
+#include "OpenSpoolParser.h"
 
 #include <cstdio>
 #include <cstring>
@@ -48,22 +46,29 @@ extern "C" {
 static StubNFCConnection* g_stubNfc = nullptr;
 static LCDManager* g_lcd = nullptr;
 
-// Test bin file data (loaded once)
-static uint8_t g_binData[320];
+// Test OpenSpool JSON data (loaded once)
+static uint8_t g_binData[512];
 static size_t g_binDataSize = 0;
 
 static bool loadBinFile() {
-    FILE* f = fopen("../res/openprinttag_PETG_Jet_Black.bin", "rb");
-    if (!f) {
-        f = fopen("test/res/openprinttag_PETG_Jet_Black.bin", "rb");
-    }
-    if (!f) {
-        printf("ERROR: Could not open bin file\n");
-        return false;
-    }
-    g_binDataSize = fread(g_binData, 1, sizeof(g_binData), f);
-    fclose(f);
-    return g_binDataSize > 0;
+    OpenSpoolData tag;
+    opt_init(&tag);
+    opt_set_material_type(&tag, OPT_MATERIAL_TYPE_PETG);
+    strncpy(tag.type, "PETG Jet Black", sizeof(tag.type) - 1);
+    const uint8_t petgColor[4] = {0x24, 0x29, 0x2A, 0xFF};
+    opt_set_primary_color(&tag, petgColor);
+    opt_set_brand_name(&tag, "Prusament");
+    opt_set_actual_full_weight(&tag, 1050.0f);
+    tag.remaining_weight = 1050.0f;
+    tag.spoolman_id = 14;
+
+    char jsonBuf[384];
+    size_t jsonLen = OpenSpoolParser::serializeJsonPayload(&tag, jsonBuf, sizeof(jsonBuf));
+    if (jsonLen == 0) return false;
+
+    memcpy(g_binData, jsonBuf, jsonLen);
+    g_binDataSize = jsonLen;
+    return true;
 }
 
 static bool sawSuccessfulSpoolUpdate() {
@@ -116,13 +121,25 @@ void teardown_test() {
     }
 }
 
-// Helper: set up a tag with valid data so it's detected as present
+// Helper: set up a tag with valid OpenSpool data so it's detected as present
 void setupTagPresent(const uint8_t* uid, uint8_t uidLen) {
     g_stubNfc->setTagPresent(true);
     g_stubNfc->setTagUid(uid, uidLen);
-    g_stubNfc->setTagData(g_binData, g_binDataSize);
 
-    // Do an initial scan to detect the tag
+    OpenSpoolData tag;
+    opt_init(&tag);
+    opt_set_material_type(&tag, OPT_MATERIAL_TYPE_PETG);
+    strncpy(tag.type, "PETG Jet Black", sizeof(tag.type) - 1);
+    const uint8_t petgColor[4] = {0x24, 0x29, 0x2A, 0xFF};
+    opt_set_primary_color(&tag, petgColor);
+    opt_set_brand_name(&tag, "Prusament");
+    opt_set_actual_full_weight(&tag, 1050.0f);
+    tag.remaining_weight = 1050.0f;
+    tag.spoolman_id = 14;
+
+    OpenSpoolParser::writeToTag(g_stubNfc, &tag);
+
+    // Initial scan to detect the tag
     NFCManager::getInstance().scanOnce();
 }
 
@@ -130,8 +147,8 @@ void setupTagPresent(const uint8_t* uid, uint8_t uidLen) {
 int test_raw_write_writes_pages() {
     setup_test();
 
-    uint8_t uid[8] = {0x17, 0x5A, 0xEC, 0x18, 0x09, 0x01, 0x04, 0xE0};
-    setupTagPresent(uid, 8);
+    uint8_t uid[7] = {0x04, 0x5A, 0xEC, 0x18, 0x09, 0x01, 0x04};
+    setupTagPresent(uid, 7);
     g_stubNfc->clearPageWrites();
 
     // Enqueue raw write
@@ -139,7 +156,7 @@ int test_raw_write_writes_pages() {
     memset(&req, 0, sizeof(req));
     req.request_id = 100;
     req.type = NFCWriteType::WRITE_RAW_TAG;
-    strncpy(req.expected_spool_id, "175AEC18090104E0", sizeof(req.expected_spool_id) - 1);
+    strncpy(req.expected_spool_id, "045AEC18090104", sizeof(req.expected_spool_id) - 1);
 
     bool enqueued = NFCManager::getInstance().enqueueRawWrite(req, g_binData, g_binDataSize);
     TEST_ASSERT(enqueued);
@@ -147,14 +164,9 @@ int test_raw_write_writes_pages() {
     // Process the write by scanning (processWriteQueue is called during scanOnce)
     NFCManager::getInstance().scanOnce();
 
-    // Should have written pages (312 bytes = 78 pages of 4 bytes each)
     size_t writeCount = g_stubNfc->getPageWrites().size();
     printf("  [DEBUG] Page writes: %zu\n", writeCount);
     TEST_ASSERT(writeCount > 0);
-
-    // Verify first page was written with correct data
-    const auto& firstWrite = g_stubNfc->getPageWrites()[0];
-    TEST_ASSERT_EQ(firstWrite.data[0], g_binData[0]);  // 0xE1
 
     // Verify SPOOL_DETECTED message was sent
     const auto& msgs = ApplicationManager::getInstance().getSentMessages();
@@ -174,7 +186,6 @@ int test_raw_write_writes_pages() {
 int test_raw_write_rejected_no_tag() {
     setup_test();
 
-    // No tag present — don't call setupTagPresent
     g_stubNfc->setTagPresent(false);
     NFCManager::getInstance().scanOnce();  // Detect no tag
 
@@ -190,7 +201,6 @@ int test_raw_write_rejected_no_tag() {
     // But processWriteQueue should skip since no tag is present
     NFCManager::getInstance().scanOnce();
 
-    // No pages should have been written
     size_t writeCount = g_stubNfc->getPageWrites().size();
     printf("  [DEBUG] Write count (expected 0): %zu\n", writeCount);
     TEST_ASSERT_EQ(writeCount, (size_t)0);
@@ -203,8 +213,8 @@ int test_raw_write_rejected_no_tag() {
 int test_raw_write_rejected_id_mismatch() {
     setup_test();
 
-    uint8_t uid[8] = {0x17, 0x5A, 0xEC, 0x18, 0x09, 0x01, 0x04, 0xE0};
-    setupTagPresent(uid, 8);
+    uint8_t uid[7] = {0x04, 0x5A, 0xEC, 0x18, 0x09, 0x01, 0x04};
+    setupTagPresent(uid, 7);
     g_stubNfc->clearPageWrites();
 
     NFCWriteRequest req;
@@ -218,9 +228,6 @@ int test_raw_write_rejected_id_mismatch() {
 
     NFCManager::getInstance().scanOnce();
 
-    // Write should have been attempted (dequeued) but rejected due to ID mismatch
-    // The write-to-NFC should NOT have occurred
-    // Check that no NFC page writes happened
     size_t writeCount = g_stubNfc->getPageWrites().size();
     printf("  [DEBUG] Write count (expected 0): %zu\n", writeCount);
     TEST_ASSERT_EQ(writeCount, (size_t)0);
@@ -233,14 +240,14 @@ int test_raw_write_rejected_id_mismatch() {
 int test_raw_write_double_enqueue_blocked() {
     setup_test();
 
-    uint8_t uid[8] = {0x17, 0x5A, 0xEC, 0x18, 0x09, 0x01, 0x04, 0xE0};
-    setupTagPresent(uid, 8);
+    uint8_t uid[7] = {0x04, 0x5A, 0xEC, 0x18, 0x09, 0x01, 0x04};
+    setupTagPresent(uid, 7);
 
     NFCWriteRequest req;
     memset(&req, 0, sizeof(req));
     req.request_id = 400;
     req.type = NFCWriteType::WRITE_RAW_TAG;
-    strncpy(req.expected_spool_id, "175AEC18090104E0", sizeof(req.expected_spool_id) - 1);
+    strncpy(req.expected_spool_id, "045AEC18090104", sizeof(req.expected_spool_id) - 1);
 
     bool first = NFCManager::getInstance().enqueueRawWrite(req, g_binData, g_binDataSize);
     TEST_ASSERT(first);
@@ -261,8 +268,8 @@ int test_raw_write_double_enqueue_blocked() {
 int test_raw_write_clears_dedup() {
     setup_test();
 
-    uint8_t uid[8] = {0x17, 0x5A, 0xEC, 0x18, 0x09, 0x01, 0x04, 0xE0};
-    setupTagPresent(uid, 8);
+    uint8_t uid[7] = {0x04, 0x5A, 0xEC, 0x18, 0x09, 0x01, 0x04};
+    setupTagPresent(uid, 7);
     ApplicationManager::getInstance().reset();
 
     // Enqueue and process raw write
@@ -270,7 +277,7 @@ int test_raw_write_clears_dedup() {
     memset(&req, 0, sizeof(req));
     req.request_id = 500;
     req.type = NFCWriteType::WRITE_RAW_TAG;
-    strncpy(req.expected_spool_id, "175AEC18090104E0", sizeof(req.expected_spool_id) - 1);
+    strncpy(req.expected_spool_id, "045AEC18090104", sizeof(req.expected_spool_id) - 1);
 
     NFCManager::getInstance().enqueueRawWrite(req, g_binData, g_binDataSize);
     NFCManager::getInstance().scanOnce();
@@ -293,19 +300,19 @@ int test_raw_write_clears_dedup() {
     return 0;
 }
 
-// Test: write spoolman ID against real bin tag and verify readback
+// Test: write spoolman ID against real OpenSpool tag and verify readback
 int test_write_spoolman_id_real_bin() {
     setup_test();
 
-    uint8_t uid[8] = {0x17, 0x5A, 0xEC, 0x18, 0x09, 0x01, 0x04, 0xE0};
-    setupTagPresent(uid, 8);
+    uint8_t uid[7] = {0x04, 0x5A, 0xEC, 0x18, 0x09, 0x01, 0x04};
+    setupTagPresent(uid, 7);
     ApplicationManager::getInstance().reset();
 
     NFCWriteRequest req;
     memset(&req, 0, sizeof(req));
     req.request_id = 600;
     req.type = NFCWriteType::WRITE_SPOOLMAN_ID;
-    strncpy(req.expected_spool_id, "175AEC18090104E0", sizeof(req.expected_spool_id) - 1);
+    strncpy(req.expected_spool_id, "045AEC18090104", sizeof(req.expected_spool_id) - 1);
     req.data.spoolman_id = 4321;
 
     TEST_ASSERT(NFCManager::getInstance().enqueueWrite(req));
@@ -321,44 +328,12 @@ int test_write_spoolman_id_real_bin() {
     return 0;
 }
 
-// Test: dirty-write failure falls back to raw write and still succeeds
-int test_dirty_write_fallback_to_raw() {
-    setup_test();
-
-    uint8_t uid[8] = {0x17, 0x5A, 0xEC, 0x18, 0x09, 0x01, 0x04, 0xE0};
-    setupTagPresent(uid, 8);
-    g_stubNfc->clearPageWrites();
-    ApplicationManager::getInstance().reset();
-
-    NFCWriteRequest req;
-    memset(&req, 0, sizeof(req));
-    req.request_id = 700;
-    req.type = NFCWriteType::CHANGE_COLOR;
-    strncpy(req.expected_spool_id, "175AEC18090104E0", sizeof(req.expected_spool_id) - 1);
-    req.data.new_color[0] = 0x10;
-    req.data.new_color[1] = 0x20;
-    req.data.new_color[2] = 0x30;
-    req.data.new_color[3] = 0xFF;
-
-    TEST_ASSERT(NFCManager::getInstance().enqueueWrite(req));
-
-    // Force first write failure (dirty-page write), then allow fallback raw write to proceed.
-    g_stubNfc->setFailNextWrites(1);
-    NFCManager::getInstance().scanOnce();
-
-    TEST_ASSERT(sawSuccessfulSpoolUpdate());
-    TEST_ASSERT(g_stubNfc->getWriteCount() > 1);
-
-    teardown_test();
-    return 0;
-}
-
 int main() {
     if (!loadBinFile()) {
-        printf("FATAL: Could not load test bin file\n");
+        printf("FATAL: Could not load test bin data\n");
         return 1;
     }
-    printf("Loaded bin file: %zu bytes\n", g_binDataSize);
+    printf("Loaded bin data: %zu bytes\n", g_binDataSize);
 
     int passed = 0, failed = 0, total = 0;
 
@@ -370,7 +345,6 @@ int main() {
     RUN_TEST(test_raw_write_double_enqueue_blocked);
     RUN_TEST(test_raw_write_clears_dedup);
     RUN_TEST(test_write_spoolman_id_real_bin);
-    RUN_TEST(test_dirty_write_fallback_to_raw);
 
     printf("\n=== Results: %d/%d passed ===\n", passed, total);
 

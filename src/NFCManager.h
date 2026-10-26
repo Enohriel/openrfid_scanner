@@ -71,7 +71,7 @@ private:
 
     // State
     CurrentSpoolState currentSpool;
-    uint8_t lastSeenUid[8];      // ISO15693 uses 8-byte UID
+    uint8_t lastSeenUid[7];      // NTAG215 uses 7-byte UID
     uint8_t lastSeenUidLength = 0;
     bool lastSeenValid = false;
 
@@ -81,12 +81,12 @@ private:
     void addToRecentSpools();
 
     // Raw tag write sidecar buffer (filled by BLE context, consumed by scan task)
-    static constexpr size_t RAW_WRITE_BUFFER_SIZE = 320;
+    static constexpr size_t RAW_WRITE_BUFFER_SIZE = 504;
     uint8_t rawWriteBuffer_[RAW_WRITE_BUFFER_SIZE];
     size_t rawWriteBufferSize_ = 0;
     bool rawWritePending_ = false;
     bool writeRawTag();
-    opt_tag_t writeScratchTag_;   // Reused by scan task write path to avoid large stack frames
+    OpenSpoolData writeScratchTag_;   // Reused by scan task write path to avoid large stack frames
 
     // Write queue (FreeRTOS)
     QueueHandle_t writeQueue = nullptr;

@@ -1,18 +1,36 @@
 #include "ConversionUtils.h"
-#include "openprinttag_lib.h"
+#include "NFCTypes.h"
 #include <cstring>
 #include <cstdio>
 
+#include <cctype>
+
+static bool containsIgnoreCase(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return false;
+    size_t nlen = strlen(needle);
+    if (nlen == 0) return true;
+    for (size_t i = 0; haystack[i] != '\0'; i++) {
+        size_t j = 0;
+        while (needle[j] != '\0' && haystack[i + j] != '\0' &&
+               tolower((unsigned char)haystack[i + j]) == tolower((unsigned char)needle[j])) {
+            j++;
+        }
+        if (j == nlen) return true;
+    }
+    return false;
+}
+
 uint8_t materialTypeFromString(const char* type) {
-    if (strcmp(type, "PLA") == 0) return OPT_MATERIAL_TYPE_PLA;
-    if (strcmp(type, "PETG") == 0) return OPT_MATERIAL_TYPE_PETG;
-    if (strcmp(type, "ABS") == 0) return OPT_MATERIAL_TYPE_ABS;
-    if (strcmp(type, "ASA") == 0) return OPT_MATERIAL_TYPE_ASA;
-    if (strcmp(type, "TPU") == 0) return OPT_MATERIAL_TYPE_TPU;
-    if (strcmp(type, "PC") == 0) return OPT_MATERIAL_TYPE_PC;
-    if (strcmp(type, "Nylon") == 0) return OPT_MATERIAL_TYPE_PA6;
-    if (strcmp(type, "PVA") == 0) return OPT_MATERIAL_TYPE_PVA;
-    if (strcmp(type, "HIPS") == 0) return OPT_MATERIAL_TYPE_HIPS;
+    if (!type) return OPT_MATERIAL_TYPE_PLA;
+    if (containsIgnoreCase(type, "PETG")) return OPT_MATERIAL_TYPE_PETG;
+    if (containsIgnoreCase(type, "PLA")) return OPT_MATERIAL_TYPE_PLA;
+    if (containsIgnoreCase(type, "ABS")) return OPT_MATERIAL_TYPE_ABS;
+    if (containsIgnoreCase(type, "ASA")) return OPT_MATERIAL_TYPE_ASA;
+    if (containsIgnoreCase(type, "TPU")) return OPT_MATERIAL_TYPE_TPU;
+    if (containsIgnoreCase(type, "PC")) return OPT_MATERIAL_TYPE_PC;
+    if (containsIgnoreCase(type, "Nylon") || containsIgnoreCase(type, "PA")) return OPT_MATERIAL_TYPE_PA6;
+    if (containsIgnoreCase(type, "PVA")) return OPT_MATERIAL_TYPE_PVA;
+    if (containsIgnoreCase(type, "HIPS")) return OPT_MATERIAL_TYPE_HIPS;
     return OPT_MATERIAL_TYPE_PLA; // default
 }
 
