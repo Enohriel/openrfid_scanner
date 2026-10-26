@@ -81,9 +81,41 @@ void setup() {
   delay(1000);
   Serial.println("=== Starting setup ===");
 
-  // Initialize I2C with custom pins for LCD
+  // Initialize I2C and scan for LCD
+  Serial.println("Scanning I2C for LCD...");
+  uint8_t foundAddr = 0;
+
+  // Try configured pins (SDA=23, SCL=22)
   Wire.begin(LCD_SDA, LCD_SCL);
-  Serial.println("I2C initialized");
+  Wire.setTimeOut(50);
+  for (uint8_t a = 0x20; a <= 0x3F; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf("Found I2C device on SDA=%d, SCL=%d at 0x%02X\n", LCD_SDA, LCD_SCL, a);
+      foundAddr = a;
+      break;
+    }
+  }
+
+  // If not found, try standard ESP32 pins (SDA=21, SCL=22)
+  if (foundAddr == 0 && LCD_SDA != 21) {
+    Wire.begin(21, 22);
+    for (uint8_t a = 0x20; a <= 0x3F; a++) {
+      Wire.beginTransmission(a);
+      if (Wire.endTransmission() == 0) {
+        Serial.printf("Found I2C device on SDA=21, SCL=22 at 0x%02X\n", a);
+        foundAddr = a;
+        break;
+      }
+    }
+  }
+
+  if (foundAddr != 0) {
+    Serial.printf("Configuring LCD with address 0x%02X\n", foundAddr);
+    lcdManager.setAddress(foundAddr);
+  } else {
+    Serial.println("WARNING: No I2C LCD detected! Proceeding without LCD");
+  }
 
   // Initialize LCD and start its task on core 0
   lcdManager.begin();
@@ -111,6 +143,11 @@ void setup() {
   lcdManager.updateScreen("Starting BLE...", "");
   if (!BluetoothManager::getInstance().begin()) {
     Serial.println("BluetoothManager init failed - continuing without BLE");
+  } else {
+    char pinLine[17];
+    snprintf(pinLine, sizeof(pinLine), "PIN: %06u", ConfigurationManager::getInstance().getBlePin());
+    lcdManager.updateScreen("Bluetooth Ready", pinLine);
+    delay(1000);
   }
 
   // Connect to WiFi
@@ -185,10 +222,78 @@ void setup() {
   Serial.println("=== Setup complete ===");
 }
 
+static void handleSerialCommands() {
+  static char cmdBuf[64];
+  static size_t cmdLen = 0;
+
+  while (Serial.available()) {
+    int c = Serial.read();
+    if (c < 0) break;
+    if (c == '\r') continue;
+    if (c == '\n') {
+      cmdBuf[cmdLen] = '\0';
+      if (cmdLen > 0) {
+        if (strncmp(cmdBuf, "sim", 3) == 0 || strncmp(cmdBuf, "simulate", 8) == 0) {
+          float grams = 2.10f;
+          char* p = strchr(cmdBuf, ' ');
+          if (p != nullptr) {
+            float val = atof(p + 1);
+            if (val > 0.0f) grams = val;
+          }
+
+          auto& app = ApplicationManager::getInstance();
+          const char* targetSpool = app.getLastScannedSpoolId();
+          if (targetSpool[0] == '\0') {
+            targetSpool = app.getStartingSpoolId();
+          }
+
+          Serial.printf("SIMULATOR: Starting print simulation (%.2fg)...\n", grams);
+          if (targetSpool[0] == '\0') {
+            Serial.println("SIMULATOR: WARNING - No spool has been scanned yet! Please scan a spool first.");
+          } else {
+            Serial.printf("SIMULATOR: Target spool: %s\n", targetSpool);
+          }
+
+          AppMessage startMsg;
+          startMsg.type = AppMessageType::PRINT_STARTED;
+          startMsg.payload.printStarted.job_id = 9999;
+          app.sendMessage(startMsg);
+
+          vTaskDelay(pdMS_TO_TICKS(1500));
+
+          AppMessage endMsg;
+          endMsg.type = AppMessageType::PRINT_ENDED;
+          endMsg.payload.printEnded.job_id = 9999;
+          endMsg.payload.printEnded.filament_used_grams = grams;
+          endMsg.payload.printEnded.canceled = false;
+          app.sendMessage(endMsg);
+
+          Serial.printf("SIMULATOR: Print simulation ended! (%.2fg used). LCD: 'Present tag...'. Scan your spool now to apply deduction.\n", grams);
+        } else if (strcmp(cmdBuf, "help") == 0) {
+          Serial.println("=== OpenRFID Scanner Commands ===");
+          Serial.println("  sim [grams]  : Simulate print cycle (default: 2.10g)");
+          Serial.println("  status       : Show device and spool status");
+          Serial.println("=================================");
+        } else if (strcmp(cmdBuf, "status") == 0) {
+          auto& app = ApplicationManager::getInstance();
+          Serial.printf("STATUS: AppState=%s, LastSpool=%s, StartingSpool=%s\n",
+            app.getState() == AppState::MONITORING_PRINT ? "MONITORING" : "IDLE",
+            app.getLastScannedSpoolId(), app.getStartingSpoolId());
+        }
+      }
+      cmdLen = 0;
+    } else if (cmdLen + 1 < sizeof(cmdBuf)) {
+      cmdBuf[cmdLen++] = static_cast<char>(c);
+    }
+  }
+}
+
 void loop() {
+  handleSerialCommands();
+
   // Process any pending messages for the application
   ApplicationManager::getInstance().processMessages();
 
   // LCD and NFC scanning are handled by their own tasks
-  delay(100);
+  delay(50);
 }

@@ -30,6 +30,10 @@ public:
         applyDisplayMessage(displayMsg);
     }
 
+    void resetHistory() {
+        displayLogic.reset();
+    }
+
     void startTask() {}
 
     // Test inspection methods

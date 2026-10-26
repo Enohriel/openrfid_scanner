@@ -50,11 +50,33 @@ static double extractNumberValue(const char* valStart) {
 bool OpenSpoolParser::parseJsonPayload(const char* jsonStr, size_t len, OpenSpoolData* outData) {
     if (!jsonStr || len == 0 || !outData) return false;
 
+    // Detect UTF-16LE: e.g. '{' followed by 0x00
+    char utf8Buf[512];
+    const char* workingJson = jsonStr;
+    size_t workingLen = len;
+
+    const char* rawBrace = (const char*)memchr(jsonStr, '{', len);
+    if (rawBrace && (rawBrace + 1 < jsonStr + len) && rawBrace[1] == '\0') {
+        size_t startOffset = rawBrace - jsonStr;
+        size_t outIdx = 0;
+        for (size_t i = startOffset; i + 1 < len && outIdx + 1 < sizeof(utf8Buf); i += 2) {
+            uint8_t lo = (uint8_t)jsonStr[i];
+            uint8_t hi = (uint8_t)jsonStr[i + 1];
+            if (hi == 0) {
+                if (lo == 0) break;
+                utf8Buf[outIdx++] = (char)lo;
+            }
+        }
+        utf8Buf[outIdx] = '\0';
+        workingJson = utf8Buf;
+        workingLen = outIdx;
+    }
+
     // Find opening '{' and closing '}'
-    const char* start = (const char*)memchr(jsonStr, '{', len);
+    const char* start = (const char*)memchr(workingJson, '{', workingLen);
     if (!start) return false;
 
-    size_t remaining = len - (start - jsonStr);
+    size_t remaining = workingLen - (start - workingJson);
     const char* end = nullptr;
     int braceCount = 0;
     for (size_t i = 0; i < remaining; i++) {
@@ -181,14 +203,36 @@ bool OpenSpoolParser::readFromTag(NFCConnectionI* conn, OpenSpoolData* outData) 
     uint8_t userMemory[504];
     memset(userMemory, 0, sizeof(userMemory));
 
-    // Read pages 4 to 80 first (300+ bytes is more than enough for OpenSpool JSON)
-    for (uint8_t page = 4; page < 80; page++) {
-        if (!conn->readPage(page, &userMemory[(page - 4) * 4])) {
-            // If reading failed early
-            if (page < 10) return false;
+    uint8_t pagesRead = 0;
+    for (uint8_t page = 4; page < 80; page += 4) {
+        if (!conn->readBlock(page, &userMemory[(page - 4) * 4])) {
+            if (page < 12) {
+#ifndef NATIVE_TEST
+                Serial.printf("OpenSpoolParser: readBlock(%d) failed!\n", page);
+#endif
+                return false;
+            }
             break;
         }
+        pagesRead += 4;
     }
+
+#ifndef NATIVE_TEST
+    Serial.printf("OpenSpoolParser: Read %d pages successfully. Page 4 = %02X %02X %02X %02X\n",
+                  pagesRead, userMemory[0], userMemory[1], userMemory[2], userMemory[3]);
+    Serial.print("OpenSpoolParser: Raw dump: ");
+    size_t dumpLen = (pagesRead * 4 < 48) ? (pagesRead * 4) : 48;
+    for (size_t i = 0; i < dumpLen; i++) {
+        Serial.printf("%02X ", userMemory[i]);
+    }
+    Serial.println();
+    Serial.print("OpenSpoolParser: ASCII dump: ");
+    for (size_t i = 0; i < dumpLen; i++) {
+        char c = (char)userMemory[i];
+        Serial.print((c >= 32 && c <= 126) ? c : '.');
+    }
+    Serial.println();
+#endif
 
     return parseJsonPayload((const char*)userMemory, sizeof(userMemory), outData);
 }

@@ -34,6 +34,7 @@ public:
   bool writeNtagPage(uint8_t page, const uint8_t *data4);
 
   bool mifareHalt();
+  bool transceive(uint8_t *cmd, int cmdLen, uint8_t validBits = 0, uint32_t timeoutMs = 15);
 
 private:
   uint16_t rxBytesReceived();

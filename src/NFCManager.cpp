@@ -127,9 +127,7 @@ void NFCManager::scanLoop() {
     esp_task_wdt_add(NULL);
 #endif
 
-    // Initial reset + RF setup
-    connection_->reset();
-    connection_->setupRF();
+    // RF is already initialized and active from begin()
 
     // One-time startup diagnostic
 #ifndef NATIVE_TEST
@@ -162,24 +160,8 @@ void NFCManager::scanLoop() {
             attemptRecovery();
         }
 
-        // Re-arm RF field for each scan (reset + setupRF).
-        // The reset is needed to clear transceiver state between scans.
-        connection_->reset();
-        if (!connection_->setupRF()) {
-            consecutiveFailures_++;
-            if (failCount++ % 200 == 0) {
-                Serial.println("NFCManager: setupRF() failed");
-            }
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        }
-
-        // Give tag time to power up from RF field before sending inventory.
-        // ISO15693 tags need ~5-10ms to charge from the RF field.
-        vTaskDelay(pdMS_TO_TICKS(10));
-
-        // setupRF succeeded, chip is responsive
-        consecutiveFailures_ = 0;
+        // In ISO14443-A, the RF field stays active; we do not reset the hardware chip every 50ms.
+        vTaskDelay(pdMS_TO_TICKS(50));
 
         // Detect tag
         if (connection_->detectTag(uid, &uidLength)) {
@@ -390,6 +372,7 @@ void NFCManager::sendSpoolDetectedMessage(bool suppress_spoolman_sync) {
     }
 
     AppMessage msg;
+    memset(&msg, 0, sizeof(msg));
     msg.type = AppMessageType::SPOOL_DETECTED;
 
     // Copy spool ID
@@ -463,6 +446,7 @@ void NFCManager::sendSpoolDetectedMessage(bool suppress_spoolman_sync) {
 
 void NFCManager::sendBlankTagMessage() {
     AppMessage msg;
+    memset(&msg, 0, sizeof(msg));
     msg.type = AppMessageType::BLANK_TAG_DETECTED;
     strncpy(msg.payload.blankTag.spool_id, currentSpool.spool_id,
             sizeof(msg.payload.blankTag.spool_id) - 1);

@@ -1,7 +1,7 @@
 // NAME: PN5180ISO14443.cpp
 //
-// DESC: ISO14443-A protocol on NXP Semiconductors PN5180 module for Arduino / ESP32.
-// Adapted for NTAG215 (Type 2 Tag) operations.
+// DESC: ISO14443 protocol on NXP Semiconductors PN5180 module for Arduino / ESP32.
+// Adapted from ATrappmann/PN5180-Library for NTAG215 (Type 2 Tag) operations.
 //
 #include <Arduino.h>
 #include "PN5180ISO14443.h"
@@ -14,242 +14,259 @@ PN5180ISO14443::PN5180ISO14443(uint8_t SSpin, uint8_t BUSYpin, uint8_t RSTpin,
 }
 
 bool PN5180ISO14443::setupRF() {
-    PN5180DEBUG(F("Loading RF-Configuration ISO14443...\n"));
-    if (!loadRFConfig(0x00, 0x80)) {
-        return false;
-    }
-    PN5180DEBUG(F("Turning ON RF field...\n"));
-    if (!setRF_on()) {
-        return false;
-    }
-    return true;
+  Serial.println("PN5180: Loading RF-Configuration ISO14443...");
+  if (!loadRFConfig(0x00, 0x80)) {
+    Serial.println("PN5180: loadRFConfig failed!");
+    return false;
+  }
+
+  Serial.println("PN5180: Turning ON RF field...");
+  if (!setRF_on()) {
+    Serial.println("PN5180: setRF_on warning, continuing...");
+  } else {
+    Serial.println("PN5180: RF field ON successfully");
+  }
+
+  return true;
 }
 
 uint16_t PN5180ISO14443::rxBytesReceived() {
-    uint32_t rxStatus = 0;
-    readRegister(RX_STATUS, &rxStatus);
-    return (uint16_t)(rxStatus & 0x000001ff);
+  uint32_t rxStatus = 0;
+  readRegister(RX_STATUS, &rxStatus);
+  return (uint16_t)(rxStatus & 0x000001ff);
 }
 
 /*
- * Activates ISO14443-A transponder.
- * buffer must have space for 10 bytes:
- * buffer[0..1] = ATQA, buffer[2] = SAK, buffer[3..9] = UID
- * Returns UID length (4, 7, or 0 if none)
+ * buffer : must be 10 byte array
+ * buffer[0-1] is ATQA
+ * buffer[2] is sak
+ * buffer[3..6] is 4 byte UID
+ * buffer[7..9] is remaining 3 bytes of UID for 7 Byte UID tags
+ * kind : 0 = REQA, 1 = WUPA
+ *
+ * return value: UID length (4, 7 or 0 if none)
  */
 int8_t PN5180ISO14443::activateTypeA(uint8_t *buffer, uint8_t kind) {
-    uint8_t cmd[7];
-    uint8_t uidLength = 0;
+  uint8_t cmd[7];
+  uint8_t uidLength = 0;
 
-    if (!loadRFConfig(0x00, 0x80)) {
-        return -1;
+  // Ensure RF field is ON without cycling it every loop
+  uint32_t rfStatus = 0;
+  readRegister(RF_STATUS, &rfStatus);
+  if (!(rfStatus & (1 << 17))) { // bit 17 = TX_RF_STATUS
+    loadRFConfig(0x00, 0x80);
+    setRF_on();
+    delay(10);
+  }
+
+  // OFF Crypto
+  if (!writeRegisterWithAndMask(SYSTEM_CONFIG, 0xFFFFFFBF)) return 0;
+  // Clear RX CRC
+  if (!writeRegisterWithAndMask(CRC_RX_CONFIG, 0xFFFFFFFE)) return 0;
+  // Clear TX CRC
+  if (!writeRegisterWithAndMask(CRC_TX_CONFIG, 0xFFFFFFFE)) return 0;
+
+  // Set IDLE then TRANSCEIVE command
+  if (!writeRegisterWithAndMask(SYSTEM_CONFIG, 0xFFFFFFF8)) return 0;
+  if (!writeRegisterWithOrMask(SYSTEM_CONFIG, 0x00000003)) return 0;
+
+  clearIRQStatus(0xffffffff);
+
+  // Send REQA (0x26) or WUPA (0x52), 7 bits in last byte
+  cmd[0] = (kind == 0) ? 0x26 : 0x52;
+  if (!sendData(cmd, 1, 0x07)) return 0;
+
+  delay(5);
+  if (rxBytesReceived() < 2) return 0;
+
+  // READ 2 bytes ATQA into buffer
+  if (!readData(2, buffer)) return 0;
+
+  clearIRQStatus(0xffffffff);
+
+  // Send Anti collision 1, 8 bits in last byte
+  cmd[0] = 0x93;
+  cmd[1] = 0x20;
+  if (!sendData(cmd, 2, 0x00)) return 0;
+
+  delay(5);
+  if (rxBytesReceived() != 5) return 0;
+
+  // Read 5 bytes, store at offset 2 for later usage
+  if (!readData(5, cmd+2)) return 0;
+
+  // Enable RX CRC calculation
+  if (!writeRegisterWithOrMask(CRC_RX_CONFIG, 0x01)) return 0;
+  // Enable TX CRC calculation
+  if (!writeRegisterWithOrMask(CRC_TX_CONFIG, 0x01)) return 0;
+
+  // Send Select anti collision 1
+  cmd[0] = 0x93;
+  cmd[1] = 0x70;
+  if (!sendData(cmd, 7, 0x00)) return 0;
+
+  delay(5);
+  if (rxBytesReceived() < 1) return 0;
+
+  // Read 1 byte SAK into buffer[2]
+  if (!readData(1, buffer+2)) return 0;
+
+  // Check if tag is 4 Byte UID or 7 byte UID (Bit 2 == 0 means 4-byte)
+  if ((buffer[2] & 0x04) == 0) {
+    for (int i = 0; i < 4; i++) buffer[3+i] = cmd[2 + i];
+    uidLength = 4;
+  } else {
+    if (cmd[2] != 0x88) return 0; // Cascade tag
+    for (int i = 0; i < 3; i++) buffer[3+i] = cmd[3 + i];
+
+    // Clear RX CRC
+    if (!writeRegisterWithAndMask(CRC_RX_CONFIG, 0xFFFFFFFE)) return 0;
+    // Clear TX CRC
+    if (!writeRegisterWithAndMask(CRC_TX_CONFIG, 0xFFFFFFFE)) return 0;
+
+    // Do anti collision 2
+    cmd[0] = 0x95;
+    cmd[1] = 0x20;
+    if (!sendData(cmd, 2, 0x00)) return 0;
+
+    delay(5);
+    if (rxBytesReceived() != 5) return 0;
+
+    // Read 5 bytes
+    if (!readData(5, cmd+2)) return 0;
+
+    for (int i = 0; i < 4; i++) {
+      buffer[6 + i] = cmd[2+i];
     }
 
-    // Disable crypto
-    if (!writeRegisterWithAndMask(SYSTEM_CONFIG, 0xFFFFFFBF)) {
-        return -1;
-    }
-    // Disable RX CRC for short frame REQA/WUPA
-    if (!writeRegisterWithAndMask(CRC_RX_CONFIG, 0xFFFFFFFE)) {
-        return -1;
-    }
-    // Disable TX CRC
-    if (!writeRegisterWithAndMask(CRC_TX_CONFIG, 0xFFFFFFFE)) {
-        return -1;
-    }
+    // Enable RX CRC calculation
+    if (!writeRegisterWithOrMask(CRC_RX_CONFIG, 0x01)) return 0;
+    // Enable TX CRC calculation
+    if (!writeRegisterWithOrMask(CRC_TX_CONFIG, 0x01)) return 0;
 
-    // REQA = 0x26, WUPA = 0x52 (7 bits)
-    cmd[0] = (kind == 0) ? 0x26 : 0x52;
-    if (!sendData(cmd, 1, 0x07)) {
-        return 0;
-    }
-
-    uint16_t len = rxBytesReceived();
-    if (len != 2) {
-        return 0;
-    }
-
-    // Read ATQA (2 bytes)
-    readData(2, buffer);
-
-    // Enable RX and TX CRC for subsequent commands
-    writeRegisterWithOrMask(CRC_RX_CONFIG, 0x00000001);
-    writeRegisterWithOrMask(CRC_TX_CONFIG, 0x00000001);
-
-    // --- Cascade Level 1 ---
-    cmd[0] = 0x93; // SELECT Cascade Level 1
-    cmd[1] = 0x20; // NVB = 2 bytes
-    if (!sendData(cmd, 2, 0x00)) {
-        return 0;
-    }
-
-    len = rxBytesReceived();
-    if (len < 5) {
-        return 0;
-    }
-
-    uint8_t cl1_resp[5];
-    readData(5, cl1_resp);
-
-    // Complete Cascade Level 1 selection
-    cmd[0] = 0x93;
+    // Send Select anti collision 2
+    cmd[0] = 0x95;
     cmd[1] = 0x70;
-    memcpy(&cmd[2], cl1_resp, 5);
-    if (!sendData(cmd, 7, 0x00)) {
-        return 0;
-    }
+    if (!sendData(cmd, 7, 0x00)) return 0;
 
-    len = rxBytesReceived();
-    if (len < 1) {
-        return 0;
-    }
+    delay(5);
+    if (rxBytesReceived() < 1) return 0;
 
-    uint8_t sak = 0;
-    readData(1, &sak);
-    buffer[2] = sak;
+    // Read 1 byte SAK into buffer[2]
+    if (!readData(1, buffer + 2)) return 0;
+    uidLength = 7;
+  }
 
-    // Check if cascade bit is set in SAK (bit 3 / 0x04)
-    if (sak & 0x04) {
-        // UID not complete -> Cascade Level 2 (e.g. NTAG215 7-byte UID)
-        // Store first 3 UID bytes (skip 0x88 cascade tag)
-        buffer[3] = cl1_resp[1];
-        buffer[4] = cl1_resp[2];
-        buffer[5] = cl1_resp[3];
-
-        // --- Cascade Level 2 ---
-        cmd[0] = 0x95; // SELECT Cascade Level 2
-        cmd[1] = 0x20;
-        if (!sendData(cmd, 2, 0x00)) {
-            return 0;
-        }
-
-        len = rxBytesReceived();
-        if (len < 5) {
-            return 0;
-        }
-
-        uint8_t cl2_resp[5];
-        readData(5, cl2_resp);
-
-        // Complete Cascade Level 2 selection
-        cmd[0] = 0x95;
-        cmd[1] = 0x70;
-        memcpy(&cmd[2], cl2_resp, 5);
-        if (!sendData(cmd, 7, 0x00)) {
-            return 0;
-        }
-
-        len = rxBytesReceived();
-        if (len < 1) {
-            return 0;
-        }
-        readData(1, &sak);
-        buffer[2] = sak;
-
-        // Next 4 UID bytes
-        buffer[6] = cl2_resp[0];
-        buffer[7] = cl2_resp[1];
-        buffer[8] = cl2_resp[2];
-        buffer[9] = cl2_resp[3];
-
-        uidLength = 7;
-    } else {
-        // Single size UID (4 bytes)
-        buffer[3] = cl1_resp[0];
-        buffer[4] = cl1_resp[1];
-        buffer[5] = cl1_resp[2];
-        buffer[6] = cl1_resp[3];
-        uidLength = 4;
-    }
-
-    return uidLength;
+  return uidLength;
 }
 
 int8_t PN5180ISO14443::readCardSerial(uint8_t *buffer) {
-    uint8_t raw[10];
-    int8_t uidLen = activateTypeA(raw, 0);
-    if (uidLen <= 0) {
-        return 0;
-    }
+  static uint32_t pollLog = 0;
+  if (++pollLog % 40 == 0) {
+    Serial.println("PN5180: Polling... (field active, awaiting tag)");
+  }
 
-    // Check for valid non-dummy UID
-    bool valid = false;
-    for (int i = 0; i < uidLen; i++) {
-        if (raw[3 + i] != 0x00 && raw[3 + i] != 0xFF) {
-            valid = true;
-            break;
-        }
-    }
-    if (!valid) {
-        return 0;
-    }
+  uint8_t response[10];
+  memset(response, 0, sizeof(response));
 
-    memcpy(buffer, &raw[3], uidLen);
-    return uidLen;
+  // Try WUPA first, then REQA
+  uint8_t uidLen = activateTypeA(response, 1);
+  if (uidLen == 0) {
+    uidLen = activateTypeA(response, 0);
+  }
+
+  if (uidLen == 0) return 0;
+  if ((response[0] == 0xFF) && (response[1] == 0xFF)) return 0;
+  if ((response[3] == 0x00) && (response[4] == 0x00) && (response[5] == 0x00) && (response[6] == 0x00)) return 0;
+  if ((response[3] == 0xFF) && (response[4] == 0xFF) && (response[5] == 0xFF) && (response[6] == 0xFF)) return 0;
+
+  for (int i = 0; i < 7; i++) buffer[i] = response[i+3];
+  Serial.printf("PN5180: Tag detected! UID (%d bytes): %02X %02X %02X %02X %02X %02X %02X\n",
+                uidLen, buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5], buffer[6]);
+  return uidLen;
 }
 
 bool PN5180ISO14443::isCardPresent() {
-    uint8_t uid[10];
-    return (readCardSerial(uid) >= 4);
+  uint8_t buffer[10];
+  return (readCardSerial(buffer) >= 4);
 }
 
-bool PN5180ISO14443::mifareBlockRead(uint8_t blockno, uint8_t *buffer16) {
-    uint8_t cmd[2];
-    cmd[0] = 0x30; // READ 16 bytes (4 pages on NTAG)
-    cmd[1] = blockno;
-    if (!sendData(cmd, 2, 0x00)) {
-        return false;
-    }
-    delay(5);
-    uint16_t len = rxBytesReceived();
-    if (len >= 16) {
-        readData(16, buffer16);
-        return true;
-    }
-    return false;
+bool PN5180ISO14443::mifareBlockRead(uint8_t blockno, uint8_t *buffer) {
+  uint8_t cmd[2];
+  cmd[0] = 0x30;
+  cmd[1] = blockno;
+  if (!sendData(cmd, 2, 0x00)) return false;
+
+  unsigned long start = millis();
+  uint16_t len = 0;
+  while (millis() - start < 40) {
+    len = rxBytesReceived();
+    if (len >= 16) break;
+    delay(1);
+  }
+
+  if (len >= 16) {
+    return readData(16, buffer);
+  }
+  return false;
 }
 
 bool PN5180ISO14443::readNtagPage(uint8_t page, uint8_t *buffer4) {
-    uint8_t buf16[16];
-    if (!mifareBlockRead(page, buf16)) {
-        return false;
-    }
+  uint8_t buf16[16];
+  if (mifareBlockRead(page, buf16)) {
     memcpy(buffer4, buf16, 4);
     return true;
+  }
+  return false;
 }
 
 bool PN5180ISO14443::writeNtagPage(uint8_t page, const uint8_t *data4) {
-    uint8_t cmd[6];
-    cmd[0] = 0xA2; // NTAG WRITE (4 bytes)
-    cmd[1] = page;
-    cmd[2] = data4[0];
-    cmd[3] = data4[1];
-    cmd[4] = data4[2];
-    cmd[5] = data4[3];
+  uint8_t cmd[6];
+  cmd[0] = 0xA2;
+  cmd[1] = page;
+  memcpy(&cmd[2], data4, 4);
 
-    // Clear RX CRC because ACK is only 4 bits (half byte)
-    writeRegisterWithAndMask(CRC_RX_CONFIG, 0xFFFFFFFE);
+  // Disable CRC on RX (NTAG ACK is 4-bit nibble 0x0A without CRC)
+  writeRegisterWithAndMask(CRC_RX_CONFIG, 0xFFFFFFFE);
+  // Enable CRC on TX (write command has CRC-16)
+  writeRegisterWithOrMask(CRC_TX_CONFIG, 0x01);
 
-    if (!sendData(cmd, 6, 0x00)) {
-        // Re-enable CRC before returning
-        writeRegisterWithOrMask(CRC_RX_CONFIG, 0x00000001);
-        return false;
-    }
+  clearIRQStatus(0xffffffff);
 
-    delay(6); // Wait for NTAG EEPROM programming (max 4.1ms)
-    uint8_t ack[2] = {0};
-    uint8_t *res = readData(1, ack);
-
-    // Re-enable RX CRC
-    writeRegisterWithOrMask(CRC_RX_CONFIG, 0x00000001);
-
-    if (res && ((ack[0] & 0x0F) == 0x0A)) {
-        return true;
-    }
+  if (!sendData(cmd, 6, 0x00)) {
+    writeRegisterWithOrMask(CRC_RX_CONFIG, 0x01);
     return false;
+  }
+
+  unsigned long start = millis();
+  uint16_t len = 0;
+  while (millis() - start < 30) {
+    len = rxBytesReceived();
+    if (len > 0) break;
+    delay(1);
+  }
+
+  bool success = false;
+  if (len > 0) {
+    uint8_t ack[2] = {0};
+    if (readData(1, ack)) {
+      if ((ack[0] & 0x0F) == 0x0A) {
+        success = true;
+      }
+    }
+  }
+
+  // Restore CRC on RX for subsequent reads
+  writeRegisterWithOrMask(CRC_RX_CONFIG, 0x01);
+
+  if (success) {
+    delay(6); // t_WRITE: NTAG EEPROM programming time is max 5ms
+  }
+  return success;
 }
 
 bool PN5180ISO14443::mifareHalt() {
-    uint8_t cmd[2] = { 0x50, 0x00 };
-    return sendData(cmd, 2, 0x00);
+  uint8_t cmd[2] = { 0x50, 0x00 };
+  sendData(cmd, 2, 0x00);
+  return true;
 }

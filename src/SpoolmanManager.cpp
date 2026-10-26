@@ -1,6 +1,8 @@
 #include "SpoolmanManager.h"
 #include "ConfigurationManager.h"
 #include "ApplicationManager.h"
+#include "ConversionUtils.h"
+#include "NFCTypes.h"
 #include <HTTPClient.h>
 #include <WiFiClient.h>
 #include <ArduinoJson.h>
@@ -33,19 +35,22 @@ static bool matchesUuid(const char* storedUuid, const char* uuid) {
     if (storedUuid == nullptr || uuid == nullptr) {
         return false;
     }
-    if (strcmp(storedUuid, uuid) == 0) {
+    if (strcasecmp(storedUuid, uuid) == 0) {
         return true;
     }
-    // Spoolman extra field may store UUID as a quoted JSON string: "\"UUID\""
+    // Search as substring inside comma-separated or quoted list: e.g. "\"53BD9CFE420001,048C3157CE2A81\""
+    const char* p = storedUuid;
     const size_t uuidLen = strlen(uuid);
-    const size_t storedLen = strlen(storedUuid);
-    if (storedLen != uuidLen + 2) {
-        return false;
+    while ((p = strcasestr(p, uuid)) != nullptr) {
+        bool startOk = (p == storedUuid || *(p - 1) == ',' || *(p - 1) == '"' || *(p - 1) == ' ' || *(p - 1) == '\'');
+        char endChar = *(p + uuidLen);
+        bool endOk = (endChar == '\0' || endChar == ',' || endChar == '"' || endChar == ' ' || endChar == '\'');
+        if (startOk && endOk) {
+            return true;
+        }
+        p += uuidLen;
     }
-    return storedUuid[0] == '"' &&
-           strncmp(storedUuid + 1, uuid, uuidLen) == 0 &&
-           storedUuid[uuidLen + 1] == '"' &&
-           storedUuid[uuidLen + 2] == '\0';
+    return false;
 }
 
 static bool readStringValue(json_reader& reader, char* out, size_t outSize) {
@@ -114,7 +119,7 @@ static bool parseVendorIdByName(const char* jsonText, const char* targetName, in
         int candidateId = -1;
         char candidateName[64] = {0};
         while (reader.read()) {
-            if (reader.node_type() == json_node_type::end_object && reader.depth() == objectDepth) {
+            if (reader.node_type() == json_node_type::end_object && reader.depth() < objectDepth) {
                 if (candidateName[0] != '\0' && strcasecmp(candidateName, targetName) == 0 && candidateId >= 0) {
                     outId = candidateId;
                     return true;
@@ -144,7 +149,7 @@ static bool parseFirstArrayItemId(const char* jsonText, int& outId) {
         if (reader.node_type() != json_node_type::object) continue;
         const unsigned objectDepth = reader.depth();
         while (reader.read()) {
-            if (reader.node_type() == json_node_type::end_object && reader.depth() == objectDepth) {
+            if (reader.node_type() == json_node_type::end_object && reader.depth() < objectDepth) {
                 break;
             }
             if (reader.node_type() != json_node_type::field) continue;
@@ -168,7 +173,7 @@ static bool parseSpoolIdByUuid(const char* jsonText, const char* uuid, int& outI
         int spoolId = -1;
         char tagUuid[80] = {0};
         while (reader.read()) {
-            if (reader.node_type() == json_node_type::end_object && reader.depth() == spoolDepth) {
+            if (reader.node_type() == json_node_type::end_object && reader.depth() < spoolDepth) {
                 if (spoolId >= 0 && matchesUuid(tagUuid, uuid)) {
                     outId = spoolId;
                     return true;
@@ -176,20 +181,22 @@ static bool parseSpoolIdByUuid(const char* jsonText, const char* uuid, int& outI
                 break;
             }
             if (reader.node_type() != json_node_type::field) continue;
+            const unsigned fieldDepth = reader.depth();
             const char* field = reader.value();
-            if (strcmp(field, "id") == 0) {
+            if (fieldDepth == spoolDepth && strcmp(field, "id") == 0) {
                 if (reader.read()) readIntValue(reader, spoolId);
-            } else if (strcmp(field, "extra") == 0) {
+            } else if (fieldDepth == spoolDepth && strcmp(field, "extra") == 0) {
                 if (!reader.read() || reader.node_type() != json_node_type::object) {
                     continue;
                 }
                 const unsigned extraDepth = reader.depth();
                 while (reader.read()) {
-                    if (reader.node_type() == json_node_type::end_object && reader.depth() == extraDepth) {
+                    if (reader.node_type() == json_node_type::end_object && reader.depth() < extraDepth) {
                         break;
                     }
                     if (reader.node_type() != json_node_type::field) continue;
-                    if (strcmp(reader.value(), "openprinttag_uuid") != 0 &&
+                    if (strcmp(reader.value(), "card_uids") != 0 &&
+                        strcmp(reader.value(), "openprinttag_uuid") != 0 &&
                         strcmp(reader.value(), "openrfid_uuid") != 0 &&
                         strcmp(reader.value(), "openspool_uuid") != 0) continue;
                     if (reader.read()) {
@@ -210,7 +217,8 @@ static bool parseSpoolUuid(const char* jsonText, char* outUuid, size_t outUuidSi
 
     while (reader.read()) {
         if (reader.node_type() != json_node_type::field) continue;
-        if (strcmp(reader.value(), "openprinttag_uuid") != 0 &&
+        if (strcmp(reader.value(), "card_uids") != 0 &&
+            strcmp(reader.value(), "openprinttag_uuid") != 0 &&
             strcmp(reader.value(), "openrfid_uuid") != 0 &&
             strcmp(reader.value(), "openspool_uuid") != 0) continue;
         if (!reader.read()) return false;
@@ -224,15 +232,23 @@ static bool parseSpoolUuid(const char* jsonText, char* outUuid, size_t outUuidSi
 static int httpGet(const char* path, String& response) {
     const char* baseUrl = ConfigurationManager::getInstance().getSpoolmanURL();
     WiFiClient client;
+    client.setTimeout(10);
     HTTPClient http;
+    http.useHTTP10(true);
+    http.setReuse(false);
+    http.setTimeout(10000);
 
     char url[256];
     snprintf(url, sizeof(url), "%s%s", baseUrl, path);
     http.begin(client, url);
+    http.addHeader("Connection", "close");
     int code = http.GET();
     if (code > 0) {
         response = http.getString();
+    } else {
+        Serial.printf("SpoolmanManager: httpGet(%s) failed, code=%d\n", path, code);
     }
+    client.stop();
     http.end();
     return code;
 }
@@ -240,16 +256,24 @@ static int httpGet(const char* path, String& response) {
 static int httpPost(const char* path, const char* body, String& response) {
     const char* baseUrl = ConfigurationManager::getInstance().getSpoolmanURL();
     WiFiClient client;
+    client.setTimeout(10);
     HTTPClient http;
+    http.useHTTP10(true);
+    http.setReuse(false);
+    http.setTimeout(10000);
 
     char url[256];
     snprintf(url, sizeof(url), "%s%s", baseUrl, path);
     http.begin(client, url);
     http.addHeader("Content-Type", "application/json");
+    http.addHeader("Connection", "close");
     int code = http.POST(body);
     if (code > 0) {
         response = http.getString();
+    } else {
+        Serial.printf("SpoolmanManager: httpPost(%s) failed, code=%d\n", path, code);
     }
+    client.stop();
     http.end();
     return code;
 }
@@ -257,16 +281,49 @@ static int httpPost(const char* path, const char* body, String& response) {
 static int httpPatch(const char* path, const char* body, String& response) {
     const char* baseUrl = ConfigurationManager::getInstance().getSpoolmanURL();
     WiFiClient client;
+    client.setTimeout(10);
     HTTPClient http;
+    http.useHTTP10(true);
+    http.setReuse(false);
+    http.setTimeout(10000);
 
     char url[256];
     snprintf(url, sizeof(url), "%s%s", baseUrl, path);
     http.begin(client, url);
     http.addHeader("Content-Type", "application/json");
+    http.addHeader("Connection", "close");
     int code = http.PATCH(body);
     if (code > 0) {
         response = http.getString();
+    } else {
+        Serial.printf("SpoolmanManager: httpPatch(%s) failed, code=%d\n", path, code);
     }
+    client.stop();
+    http.end();
+    return code;
+}
+
+static int httpPut(const char* path, const char* body, String& response) {
+    const char* baseUrl = ConfigurationManager::getInstance().getSpoolmanURL();
+    WiFiClient client;
+    client.setTimeout(10);
+    HTTPClient http;
+    http.useHTTP10(true);
+    http.setReuse(false);
+    http.setTimeout(10000);
+
+    char url[256];
+    snprintf(url, sizeof(url), "%s%s", baseUrl, path);
+    http.begin(client, url);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Connection", "close");
+    int code = http.PUT(body);
+    if (code > 0) {
+        response = http.getString();
+    } else {
+        Serial.printf("SpoolmanManager: httpPut(%s) failed, code=%d\n", path, code);
+    }
+    client.stop();
     http.end();
     return code;
 }
@@ -281,26 +338,9 @@ static const char* materialTypeToSpoolmanStr(uint8_t type) {
         case OPT_MATERIAL_TYPE_ABS:  return "ABS";
         case OPT_MATERIAL_TYPE_ASA:  return "ASA";
         case OPT_MATERIAL_TYPE_PC:   return "PC";
-        case OPT_MATERIAL_TYPE_PCTG: return "PCTG";
-        case OPT_MATERIAL_TYPE_PP:   return "PP";
         case OPT_MATERIAL_TYPE_PA6:  return "PA6";
-        case OPT_MATERIAL_TYPE_PA11: return "PA11";
-        case OPT_MATERIAL_TYPE_PA12: return "PA12";
-        case OPT_MATERIAL_TYPE_PA66: return "PA66";
-        case OPT_MATERIAL_TYPE_CPE:  return "CPE";
-        case OPT_MATERIAL_TYPE_TPE:  return "TPE";
-        case OPT_MATERIAL_TYPE_HIPS: return "HIPS";
-        case OPT_MATERIAL_TYPE_PHA:  return "PHA";
-        case OPT_MATERIAL_TYPE_PET:  return "PET";
-        case OPT_MATERIAL_TYPE_PEI:  return "PEI";
-        case OPT_MATERIAL_TYPE_PBT:  return "PBT";
-        case OPT_MATERIAL_TYPE_PVB:  return "PVB";
         case OPT_MATERIAL_TYPE_PVA:  return "PVA";
-        case OPT_MATERIAL_TYPE_PEKK: return "PEKK";
-        case OPT_MATERIAL_TYPE_PEEK: return "PEEK";
-        case OPT_MATERIAL_TYPE_BVOH: return "BVOH";
-        case OPT_MATERIAL_TYPE_TPC:  return "TPC";
-        case OPT_MATERIAL_TYPE_PPS:  return "PPS";
+        case OPT_MATERIAL_TYPE_HIPS: return "HIPS";
         default: return "PLA";
     }
 }
@@ -327,7 +367,7 @@ static int findOrCreateVendor(const char* name) {
     }
 
     // Create new vendor
-    StaticJsonDocument<JSON_SMALL_CAPACITY> createDoc;
+    JsonDocument createDoc;
     createDoc["name"] = name;
     String body;
     serializeJson(createDoc, body);
@@ -365,7 +405,7 @@ static int findOrCreateFilament(int vendorId, const SpoolmanSyncRequest& req) {
     char colorHex[7];
     snprintf(colorHex, sizeof(colorHex), "%02X%02X%02X", req.color[0], req.color[1], req.color[2]);
 
-    StaticJsonDocument<JSON_MEDIUM_CAPACITY> createDoc;
+    JsonDocument createDoc;
     createDoc["name"] = material;
     createDoc["vendor_id"] = vendorId;
     createDoc["material"] = material;
@@ -424,17 +464,15 @@ static int createSpool(int filamentId, const SpoolmanSyncRequest& req) {
     char colorHex[7];
     snprintf(colorHex, sizeof(colorHex), "%02X%02X%02X", req.color[0], req.color[1], req.color[2]);
 
-    StaticJsonDocument<JSON_MEDIUM_CAPACITY> doc;
+    JsonDocument doc;
     doc["filament_id"] = filamentId;
     doc["remaining_weight"] = req.remaining_weight_g;
     doc["initial_weight"] = req.initial_weight_g;
 
-    // add extra quotes arround value, since spoolman expects extra values to be valid json.
-    char uuidEscaped[32];
+    // add extra quotes around value, since spoolman expects extra values to be valid json.
+    char uuidEscaped[48];
     snprintf(uuidEscaped, sizeof(uuidEscaped), "\"%s\"", req.spool_id);
-    doc["extra"]["openprinttag_uuid"] = uuidEscaped;
-    doc["extra"]["openrfid_uuid"] = uuidEscaped;
-    doc["extra"]["openspool_uuid"] = uuidEscaped;
+    doc["extra"]["card_uids"] = uuidEscaped;
 
     String body;
     serializeJson(doc, body);
@@ -457,7 +495,7 @@ static int createSpool(int filamentId, const SpoolmanSyncRequest& req) {
     return -1;
 }
 
-static bool lookupSpoolById(int spoolId, const char* uuid) {
+static bool lookupSpoolById(int spoolId, const char* uuid, float* outRemainingWeight = nullptr, char* outMaterial = nullptr, size_t materialSize = 0) {
     char path[64];
     snprintf(path, sizeof(path), "/api/v1/spool/%d", spoolId);
     String response;
@@ -474,6 +512,22 @@ static bool lookupSpoolById(int spoolId, const char* uuid) {
     }
 
     if (matchesUuid(tagUuid, uuid)) {
+        SpoolmanManager::getInstance().storeCachedSpoolmanUids(tagUuid, spoolId);
+        if (outRemainingWeight != nullptr || (outMaterial != nullptr && materialSize > 0)) {
+            JsonDocument doc;
+            if (deserializeJson(doc, response) == DeserializationError::Ok) {
+                if (outRemainingWeight != nullptr && doc["remaining_weight"].is<float>()) {
+                    *outRemainingWeight = doc["remaining_weight"].as<float>();
+                }
+                if (outMaterial != nullptr && materialSize > 0) {
+                    const char* mat = doc["filament"]["material"] | "";
+                    if (mat && mat[0] != '\0') {
+                        strncpy(outMaterial, mat, materialSize - 1);
+                        outMaterial[materialSize - 1] = '\0';
+                    }
+                }
+            }
+        }
         return true;
     }
 
@@ -485,6 +539,7 @@ static int findSpoolByUuidGlobal(const char* uuid) {
     String response;
     int code = httpGet("/api/v1/spool", response);
     if (code != 200) {
+        Serial.printf("SpoolmanManager: findSpoolByUuidGlobal httpGet returned %d\n", code);
         return -1;
     }
 
@@ -495,11 +550,13 @@ static int findSpoolByUuidGlobal(const char* uuid) {
         return id;
     }
 
+    Serial.printf("SpoolmanManager: UUID %s not matched in global spools list (%d bytes)\n",
+                  uuid, (int)response.length());
     return -1;
 }
 
 static bool updateSpool(int spoolId, int filamentId, float remainingWeight) {
-    StaticJsonDocument<JSON_SMALL_CAPACITY> doc;
+    JsonDocument doc;
     doc["remaining_weight"] = remainingWeight;
     if (filamentId >= 0) {
         doc["filament_id"] = filamentId;
@@ -729,6 +786,19 @@ bool SpoolmanManager::enqueueSync(const SpoolmanSyncRequest& req) {
     return xQueueSend(syncQueue, &req, pdMS_TO_TICKS(100)) == pdTRUE;
 }
 
+bool SpoolmanManager::enqueueUseFilament(const char* spool_id, float grams_used) {
+    if (syncQueue == nullptr || !isConfigured() || spool_id == nullptr || spool_id[0] == '\0') {
+        return false;
+    }
+    SpoolmanSyncRequest req;
+    memset(&req, 0, sizeof(req));
+    req.type = SpoolmanRequestType::USE_FILAMENT;
+    strncpy(req.spool_id, spool_id, sizeof(req.spool_id) - 1);
+    req.spool_id[sizeof(req.spool_id) - 1] = '\0';
+    req.use_weight_g = grams_used;
+    return xQueueSend(syncQueue, &req, pdMS_TO_TICKS(100)) == pdTRUE;
+}
+
 bool SpoolmanManager::isConfigured() const {
     return strlen(ConfigurationManager::getInstance().getSpoolmanURL()) > 0;
 }
@@ -767,6 +837,30 @@ void SpoolmanManager::storeCachedSpoolmanId(const char* spoolId, int32_t spoolma
     spoolIdCacheWriteIndex_ = (spoolIdCacheWriteIndex_ + 1) % (sizeof(spoolIdCache_) / sizeof(spoolIdCache_[0]));
 }
 
+void SpoolmanManager::storeCachedSpoolmanUids(const char* rawUids, int32_t spoolmanId) {
+    if (rawUids == nullptr || spoolmanId <= 0) return;
+    char buf[128];
+    strncpy(buf, rawUids, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char clean[128];
+    size_t cLen = 0;
+    for (size_t i = 0; buf[i] != '\0' && cLen + 1 < sizeof(clean); i++) {
+        if (buf[i] != '"' && buf[i] != '\'' && buf[i] != ' ') {
+            clean[cLen++] = buf[i];
+        }
+    }
+    clean[cLen] = '\0';
+
+    char* token = strtok(clean, ",");
+    while (token != nullptr) {
+        if (strlen(token) > 0) {
+            storeCachedSpoolmanId(token, spoolmanId);
+        }
+        token = strtok(nullptr, ",");
+    }
+}
+
 void SpoolmanManager::invalidateCachedSpoolmanId(const char* spoolId) {
     if (spoolId == nullptr || spoolId[0] == '\0') {
         return;
@@ -784,6 +878,56 @@ void SpoolmanManager::taskFunc(void* param) {
     self->taskLoop();
 }
 
+bool SpoolmanManager::useFilament(const char* spool_id, float grams_used, int& resolvedSpoolmanId, float& newRemainingG) {
+    if (xSemaphoreTake(httpMutex_, HTTP_MUTEX_TIMEOUT) != pdTRUE) {
+        Serial.println("SpoolmanManager: Could not acquire HTTP mutex");
+        return false;
+    }
+
+    resolvedSpoolmanId = -1;
+    newRemainingG = 0.0f;
+
+    // Prefer cached spoolman_id if known
+    int32_t spoolmanId = lookupCachedSpoolmanId(spool_id);
+    if (spoolmanId <= 0) {
+        spoolmanId = findSpoolByUuidGlobal(spool_id);
+    }
+
+    if (spoolmanId <= 0) {
+        Serial.printf("SpoolmanManager: useFilament failed - could not resolve spool ID for %s\n", spool_id);
+        xSemaphoreGive(httpMutex_);
+        return false;
+    }
+
+    JsonDocument doc;
+    doc["use_weight"] = grams_used;
+    String body;
+    serializeJson(doc, body);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/api/v1/spool/%d/use", spoolmanId);
+
+    String response;
+    int code = httpPut(path, body.c_str(), response);
+    if (code == 200) {
+        resolvedSpoolmanId = spoolmanId;
+        storeCachedSpoolmanId(spool_id, spoolmanId);
+
+        JsonDocument resDoc;
+        if (deserializeJson(resDoc, response) == DeserializationError::Ok) {
+            newRemainingG = resDoc["remaining_weight"] | 0.0f;
+        }
+        Serial.printf("SpoolmanManager: Deducted %.2fg from spool %d, remaining=%.1fg\n",
+                      grams_used, spoolmanId, newRemainingG);
+        xSemaphoreGive(httpMutex_);
+        return true;
+    }
+
+    Serial.printf("SpoolmanManager: Failed to use filament on spool %d, code=%d\n", spoolmanId, code);
+    xSemaphoreGive(httpMutex_);
+    return false;
+}
+
 void SpoolmanManager::taskLoop() {
     SpoolmanSyncRequest req;
     while (true) {
@@ -792,9 +936,31 @@ void SpoolmanManager::taskLoop() {
                 continue;
             }
 
+            if (req.type == SpoolmanRequestType::USE_FILAMENT) {
+                Serial.printf("SpoolmanManager: Processing USE_FILAMENT %.2fg for spool %s\n",
+                    req.use_weight_g, req.spool_id);
+                int resolvedSpoolmanId = -1;
+                float newRemainingG = 0.0f;
+                bool success = useFilament(req.spool_id, req.use_weight_g, resolvedSpoolmanId, newRemainingG);
+
+                AppMessage msg;
+                memset(&msg, 0, sizeof(msg));
+                msg.type = AppMessageType::SPOOLMAN_SYNCED;
+                strncpy(msg.payload.spoolmanSynced.spool_id, req.spool_id,
+                        sizeof(msg.payload.spoolmanSynced.spool_id) - 1);
+                msg.payload.spoolmanSynced.spool_id[sizeof(msg.payload.spoolmanSynced.spool_id) - 1] = '\0';
+                msg.payload.spoolmanSynced.success = success;
+                msg.payload.spoolmanSynced.kg_remaining = newRemainingG / 1000.0f;
+                msg.payload.spoolmanSynced.spoolman_id = resolvedSpoolmanId;
+                ApplicationManager::getInstance().sendMessage(msg);
+                continue;
+            }
+
             Serial.printf("SpoolmanManager: Syncing spool %s\n", req.spool_id);
             int resolvedSpoolmanId = -1;
-            bool success = syncSpool(req, resolvedSpoolmanId);
+            float remainingWeightG = req.remaining_weight_g;
+            char materialName[32] = {0};
+            bool success = syncSpool(req, resolvedSpoolmanId, remainingWeightG, materialName, sizeof(materialName));
 
             // Send result to ApplicationManager
             AppMessage msg;
@@ -803,20 +969,24 @@ void SpoolmanManager::taskLoop() {
                     sizeof(msg.payload.spoolmanSynced.spool_id) - 1);
             msg.payload.spoolmanSynced.spool_id[sizeof(msg.payload.spoolmanSynced.spool_id) - 1] = '\0';
             msg.payload.spoolmanSynced.success = success;
-            msg.payload.spoolmanSynced.kg_remaining = req.remaining_weight_g / 1000.0f;
+            msg.payload.spoolmanSynced.kg_remaining = remainingWeightG / 1000.0f;
             msg.payload.spoolmanSynced.spoolman_id = resolvedSpoolmanId;
+            strncpy(msg.payload.spoolmanSynced.material_name, materialName,
+                    sizeof(msg.payload.spoolmanSynced.material_name) - 1);
+            msg.payload.spoolmanSynced.material_name[sizeof(msg.payload.spoolmanSynced.material_name) - 1] = '\0';
             ApplicationManager::getInstance().sendMessage(msg);
         }
     }
 }
 
-bool SpoolmanManager::syncSpool(const SpoolmanSyncRequest& req, int& resolvedSpoolmanId) {
+bool SpoolmanManager::syncSpool(const SpoolmanSyncRequest& req, int& resolvedSpoolmanId, float& remainingWeightG, char* outMaterial, size_t materialSize) {
     if (xSemaphoreTake(httpMutex_, HTTP_MUTEX_TIMEOUT) != pdTRUE) {
         Serial.println("SpoolmanManager: Could not acquire HTTP mutex");
         return false;
     }
 
     resolvedSpoolmanId = -1;
+    remainingWeightG = req.remaining_weight_g;
     bool success = false;
 
     // Prefer a known-good ID for this spool UID over potentially stale tag data.
@@ -831,42 +1001,31 @@ bool SpoolmanManager::syncSpool(const SpoolmanSyncRequest& req, int& resolvedSpo
     // Fast path: if we have a spoolman_id (from cache or tag), try direct lookup.
     if (preferredSpoolmanId > 0) {
         Serial.printf("SpoolmanManager: Fast path - looking up spool %d\n", preferredSpoolmanId);
-        if (lookupSpoolById(preferredSpoolmanId, req.spool_id)) {
-            // UUID matches - just update remaining weight
-            // We still need a filament_id for updateSpool; get it from the spool response
-            // But updateSpool only needs it for the PATCH body, and the spool already has it.
-            // Simplify: use findOrCreateVendor/Filament to get filament_id for the update.
-            int vendorId = findOrCreateVendor(req.manufacturer);
-            int filamentId = (vendorId >= 0) ? findOrCreateFilament(vendorId, req) : -1;
-            if (filamentId >= 0) {
-                success = updateSpool(preferredSpoolmanId, filamentId, req.remaining_weight_g);
-            } else {
-                // Filament lookup failed but spool exists - update without changing filament_id
-                // Use a minimal PATCH with just remaining_weight
-                success = updateSpool(preferredSpoolmanId, -1, req.remaining_weight_g);
-            }
+        float fetchedWeight = -1.0f;
+        if (lookupSpoolById(preferredSpoolmanId, req.spool_id, &fetchedWeight, outMaterial, materialSize)) {
             resolvedSpoolmanId = preferredSpoolmanId;
-            if (success) {
-                storeCachedSpoolmanId(req.spool_id, resolvedSpoolmanId);
+            if (fetchedWeight >= 0.0f) {
+                remainingWeightG = fetchedWeight;
             }
+            storeCachedSpoolmanId(req.spool_id, resolvedSpoolmanId);
+            Serial.printf("SpoolmanManager: Found spool %d in Spoolman, live remaining=%.1fg\n",
+                          resolvedSpoolmanId, remainingWeightG);
             xSemaphoreGive(httpMutex_);
-            return success;
+            return true;
         }
 
-        // Stale/mismatched spoolman_id on tag (common right after tag swaps/writeback):
-        // recover by UUID before creating vendor/filament/spool to avoid duplicates.
+        // Stale/mismatched spoolman_id on tag: recover by UUID
         int existingSpoolId = findSpoolByUuidGlobal(req.spool_id);
         if (existingSpoolId > 0) {
-            int vendorId = findOrCreateVendor(req.manufacturer);
-            int filamentId = (vendorId >= 0) ? findOrCreateFilament(vendorId, req) : -1;
-            if (filamentId >= 0) {
-                success = updateSpool(existingSpoolId, filamentId, req.remaining_weight_g);
-            } else {
-                success = updateSpool(existingSpoolId, -1, req.remaining_weight_g);
-            }
-            if (success) {
+            float globalWeight = -1.0f;
+            if (lookupSpoolById(existingSpoolId, req.spool_id, &globalWeight, outMaterial, materialSize)) {
                 resolvedSpoolmanId = existingSpoolId;
+                if (globalWeight >= 0.0f) {
+                    remainingWeightG = globalWeight;
+                }
                 storeCachedSpoolmanId(req.spool_id, resolvedSpoolmanId);
+                Serial.printf("SpoolmanManager: Recovered spool %d by UUID, live remaining=%.1fg\n",
+                              resolvedSpoolmanId, remainingWeightG);
                 xSemaphoreGive(httpMutex_);
                 return true;
             }
@@ -875,7 +1034,32 @@ bool SpoolmanManager::syncSpool(const SpoolmanSyncRequest& req, int& resolvedSpo
         Serial.println("SpoolmanManager: Fast path failed, falling back to slow path");
     }
 
-    // Slow path: full vendor → filament → spool lookup/creation
+    // Slow path: check if spool exists globally before creating
+    int existingSpoolId = findSpoolByUuidGlobal(req.spool_id);
+    if (existingSpoolId > 0) {
+        float globalWeight = -1.0f;
+        if (lookupSpoolById(existingSpoolId, req.spool_id, &globalWeight, outMaterial, materialSize)) {
+            resolvedSpoolmanId = existingSpoolId;
+            if (globalWeight >= 0.0f) {
+                remainingWeightG = globalWeight;
+            }
+            storeCachedSpoolmanId(req.spool_id, resolvedSpoolmanId);
+            Serial.printf("SpoolmanManager: Found spool %d via global search, live remaining=%.1fg\n",
+                          resolvedSpoolmanId, remainingWeightG);
+            xSemaphoreGive(httpMutex_);
+            return true;
+        }
+    }
+
+    // Spool does NOT exist anywhere in Spoolman
+    // If this request came from a blank tag (no manufacturer / unformatted), do NOT create a spool!
+    if (req.manufacturer[0] == '\0' && req.material_type == 0 && req.spoolman_id < 0) {
+        Serial.printf("SpoolmanManager: Blank tag %s not found in Spoolman - skipping auto-creation\n", req.spool_id);
+        xSemaphoreGive(httpMutex_);
+        return false;
+    }
+
+    // Spool does NOT exist anywhere in Spoolman -> create vendor, filament, spool
     int vendorId = findOrCreateVendor(req.manufacturer);
     if (vendorId < 0) {
         Serial.println("SpoolmanManager: Failed to find/create vendor");
@@ -891,12 +1075,15 @@ bool SpoolmanManager::syncSpool(const SpoolmanSyncRequest& req, int& resolvedSpo
     }
 
     int spoolId = findSpoolByUuid(filamentId, req.spool_id);
-
     if (spoolId < 0) {
         spoolId = createSpool(filamentId, req);
         success = (spoolId >= 0);
     } else {
-        success = updateSpool(spoolId, filamentId, req.remaining_weight_g);
+        float foundWeight = -1.0f;
+        if (lookupSpoolById(spoolId, req.spool_id, &foundWeight, outMaterial, materialSize)) {
+            if (foundWeight >= 0.0f) remainingWeightG = foundWeight;
+        }
+        success = true;
     }
 
     if (success && spoolId > 0) {

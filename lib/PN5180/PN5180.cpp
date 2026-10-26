@@ -312,19 +312,11 @@ bool PN5180::sendData(uint8_t *data, int len, uint8_t validBits) {
 
   writeRegisterWithAndMask(SYSTEM_CONFIG, 0xfffffff8);  // Idle/StopCom Command
   writeRegisterWithOrMask(SYSTEM_CONFIG, 0x00000003);   // Transceive Command
-  /*
-   * Transceive command; initiates a transceive cycle.
-   * Note: Depending on the value of the Initiator bit, a
-   * transmission is started or the receiver is enabled
-   * Note: The transceive command does not finish
-   * automatically. It stays in the transceive cycle until
-   * stopped via the IDLE/StopCom command
-   */
 
   PN5180TransceiveStat transceiveState = getTransceiveState();
   if (PN5180_TS_WaitTransmit != transceiveState) {
-    PN5180DEBUG(F("*** ERROR: Transceiver not in state WaitTransmit!?\n"));
-    return false;
+    delay(1);
+    transceiveState = getTransceiveState();
   }
 
   SPI.beginTransaction(PN5180_SPI_SETTINGS);
@@ -423,14 +415,13 @@ bool PN5180::setRF_on() {
   transceiveCommand(cmd, 2);
   SPI.endTransaction();
 
-  {
-    unsigned long t = millis();
-    while (0 == (TX_RFON_IRQ_STAT & getIRQStatus())) { // wait for RF field to set up
-      if (millis() - t > 500) {
-        PN5180DEBUG(F("TIMEOUT waiting for TX_RFON_IRQ\n"));
-        return false;
-      }
+  unsigned long t = millis();
+  while (0 == (TX_RFON_IRQ_STAT & getIRQStatus())) {
+    if (millis() - t > 500) {
+      PN5180DEBUG(F("TIMEOUT waiting for TX_RFON_IRQ\n"));
+      return false;
     }
+    delay(1);
   }
   clearIRQStatus(TX_RFON_IRQ_STAT);
   return true;

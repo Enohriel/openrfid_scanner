@@ -7,7 +7,13 @@
 #include <freertos/semphr.h>
 #include <string>
 
+enum class SpoolmanRequestType : uint8_t {
+    SYNC = 0,
+    USE_FILAMENT = 1
+};
+
 struct SpoolmanSyncRequest {
+    SpoolmanRequestType type = SpoolmanRequestType::SYNC;
     char spool_id[17];           // NFC tag UID hex string
     uint8_t material_type;       // OPT_MATERIAL_TYPE_PLA, etc.
     char manufacturer[33];       // Brand name from tag
@@ -17,6 +23,7 @@ struct SpoolmanSyncRequest {
     float density;               // g/cm3 (from tag, or default)
     float diameter;              // mm (from tag, or default)
     int32_t spoolman_id;         // Spoolman ID from tag (-1 if absent)
+    float use_weight_g;          // Filament used in grams (for USE_FILAMENT)
 };
 
 struct SpoolDetails {
@@ -35,9 +42,12 @@ public:
     bool begin(SemaphoreHandle_t httpMutex);
     void startTask();
     bool enqueueSync(const SpoolmanSyncRequest& req);
+    bool enqueueUseFilament(const char* spool_id, float grams_used);
     bool isConfigured() const;
     bool getSpoolDetails(int32_t spoolmanId, SpoolDetails& outDetails);
     void invalidateCachedSpoolmanId(const char* spoolId);
+    void storeCachedSpoolmanId(const char* spoolId, int32_t spoolmanId);
+    void storeCachedSpoolmanUids(const char* rawUids, int32_t spoolmanId);
 
 private:
     struct SpoolIdCacheEntry {
@@ -51,14 +61,14 @@ private:
 
     static void taskFunc(void* param);
     void taskLoop();
-    bool syncSpool(const SpoolmanSyncRequest& req, int& resolvedSpoolmanId);
+    bool syncSpool(const SpoolmanSyncRequest& req, int& resolvedSpoolmanId, float& remainingWeightG, char* outMaterial = nullptr, size_t materialSize = 0);
+    bool useFilament(const char* spool_id, float grams_used, int& resolvedSpoolmanId, float& newRemainingG);
     int32_t lookupCachedSpoolmanId(const char* spoolId) const;
-    void storeCachedSpoolmanId(const char* spoolId, int32_t spoolmanId);
 
     QueueHandle_t syncQueue = nullptr;
     SemaphoreHandle_t httpMutex_ = nullptr;
     TaskHandle_t taskHandle = nullptr;
-    SpoolIdCacheEntry spoolIdCache_[8] = {};
+    SpoolIdCacheEntry spoolIdCache_[16] = {};
     uint8_t spoolIdCacheWriteIndex_ = 0;
 
     static constexpr size_t QUEUE_SIZE = 4;

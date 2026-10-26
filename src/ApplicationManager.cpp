@@ -31,11 +31,12 @@ ApplicationManager& ApplicationManager::getInstance() {
 }
 
 bool ApplicationManager::begin(LCDManager* lcd) {
+    if (lcd != nullptr) {
+        lcdManager = lcd;
+    }
     if (messageQueue != nullptr) {
         return true;  // Already initialized
     }
-
-    lcdManager = lcd;
 
     messageQueue = xQueueCreate(QUEUE_SIZE, sizeof(AppMessage));
     if (messageQueue == nullptr) {
@@ -207,8 +208,16 @@ void ApplicationManager::handlePrintStarted(const AppMessage& msg) {
     // Transition to monitoring state
     currentState = AppState::MONITORING_PRINT;
     currentJobId = msg.payload.printStarted.job_id;
-    startingSpoolId[0] = '\0';
     spoolChangedDuringPrint = false;
+
+    // Adopt last scanned spool if available before print start
+    if (lastScannedSpoolId[0] != '\0') {
+        strncpy(startingSpoolId, lastScannedSpoolId, sizeof(startingSpoolId) - 1);
+        startingSpoolId[sizeof(startingSpoolId) - 1] = '\0';
+        Serial.printf("ApplicationManager: Captured starting spool from pre-print scan: %s\n", startingSpoolId);
+    } else {
+        startingSpoolId[0] = '\0';
+    }
 
     if (lcdManager) {
         char line2[17];
@@ -253,6 +262,12 @@ void ApplicationManager::handleSpoolDetected(const AppMessage& msg) {
         msg.payload.spoolDetected.material_type,
         msg.payload.spoolDetected.kg_remaining);
 
+    // Always record the last scanned spool
+    strncpy(lastScannedSpoolId, msg.payload.spoolDetected.spool_id, sizeof(lastScannedSpoolId) - 1);
+    lastScannedSpoolId[sizeof(lastScannedSpoolId) - 1] = '\0';
+    strncpy(lastScannedMaterialName, msg.payload.spoolDetected.material_name, sizeof(lastScannedMaterialName) - 1);
+    lastScannedMaterialName[sizeof(lastScannedMaterialName) - 1] = '\0';
+
     if (currentState == AppState::MONITORING_PRINT) {
         if (startingSpoolId[0] == '\0') {
             // First spool detected during this print - capture it
@@ -280,8 +295,17 @@ void ApplicationManager::handleSpoolDetected(const AppMessage& msg) {
         char line1[17];
         char line2[17];
         snprintf(line1, sizeof(line1), "Type: %.10s", msg.payload.spoolDetected.material_name);
+#ifndef NATIVE_TEST
+        if (SpoolmanManager::getInstance().isConfigured()) {
+            lcdManager->updateScreen("**** Spool ****", "*** Scanned ***", line1, "Syncing Spoolman");
+        } else {
+            snprintf(line2, sizeof(line2), "Remain: %.0fg", msg.payload.spoolDetected.kg_remaining * 1000.0f);
+            lcdManager->updateScreen("**** Spool ****", "*** Scanned ***", line1, line2);
+        }
+#else
         snprintf(line2, sizeof(line2), "Remain: %.0fg", msg.payload.spoolDetected.kg_remaining * 1000.0f);
         lcdManager->updateScreen("**** Spool ****", "*** Scanned ***", line1, line2);
+#endif
     } else if (lcdManager) {
         Serial.printf("ApplicationManager: Skipping LCD update for already displayed spool %s\n", msg.payload.spoolDetected.spool_id);
     }
@@ -423,7 +447,39 @@ void ApplicationManager::handleBlankTagDetected(const AppMessage& msg) {
     Serial.printf("EVENT: BlankTagDetected - spool_id=%s\n",
         msg.payload.blankTag.spool_id);
 
+    // Record last scanned spool so prints can track it
+    strncpy(lastScannedSpoolId, msg.payload.blankTag.spool_id, sizeof(lastScannedSpoolId) - 1);
+    lastScannedSpoolId[sizeof(lastScannedSpoolId) - 1] = '\0';
+
+    if (currentState == AppState::MONITORING_PRINT && startingSpoolId[0] == '\0') {
+        strncpy(startingSpoolId, msg.payload.blankTag.spool_id, sizeof(startingSpoolId) - 1);
+        startingSpoolId[sizeof(startingSpoolId) - 1] = '\0';
+        Serial.printf("ApplicationManager: Captured starting spool from blank tag scan: %s\n", startingSpoolId);
+    }
+
     pendingStatusAfterTagRemoved = false;
+
+#ifndef NATIVE_TEST
+    if (SpoolmanManager::getInstance().isConfigured()) {
+        if (lcdManager && strcmp(lastDisplayedBlankId, msg.payload.blankTag.spool_id) != 0) {
+            strncpy(lastDisplayedBlankId, msg.payload.blankTag.spool_id, sizeof(lastDisplayedBlankId) - 1);
+            lastDisplayedBlankId[sizeof(lastDisplayedBlankId) - 1] = '\0';
+            lastDisplayedSpoolId[0] = '\0';
+            lcdManager->resetHistory();
+            lcdManager->updateScreen("Tag Detected", "Syncing Spoolman");
+        }
+
+        SpoolmanSyncRequest req;
+        memset(&req, 0, sizeof(req));
+        req.type = SpoolmanRequestType::SYNC;
+        strncpy(req.spool_id, msg.payload.blankTag.spool_id, sizeof(req.spool_id) - 1);
+        req.spool_id[sizeof(req.spool_id) - 1] = '\0';
+        req.spoolman_id = -1;
+        req.remaining_weight_g = 1000.0f;
+        SpoolmanManager::getInstance().enqueueSync(req);
+        return;
+    }
+#endif
 
     if (lcdManager && strcmp(lastDisplayedBlankId, msg.payload.blankTag.spool_id) != 0) {
         strncpy(lastDisplayedBlankId, msg.payload.blankTag.spool_id, sizeof(lastDisplayedBlankId) - 1);
@@ -467,13 +523,29 @@ void ApplicationManager::finishPrint(float gramsUsed, bool /*canceled*/) {
         Serial.printf("ApplicationManager: Updating spool %s - removing %.2fg\n",
             startingSpoolId, gramsUsed);
 
-        // Only auto-update NFC tag in SELF_DIRECTED mode
+        // Auto-update spool in SELF_DIRECTED mode
         if (automationMode == AutomationMode::SELF_DIRECTED) {
+#ifndef NATIVE_TEST
+            if (SpoolmanManager::getInstance().isConfigured()) {
+                lastPrintGramsUsed = gramsUsed;
+                if (lcdManager) {
+                    lcdManager->resetHistory();
+                    char line1[17];
+                    snprintf(line1, sizeof(line1), "Done: -%.1fg", gramsUsed);
+                    lcdManager->updateScreen(line1, "Syncing Spoolman");
+                }
+                SpoolmanManager::getInstance().enqueueUseFilament(startingSpoolId, gramsUsed);
+                return;
+            }
+#endif
             if (lcdManager) {
-                lcdManager->updateScreen("Updating spool..", "");
+                lcdManager->resetHistory();
+                char line1[17];
+                snprintf(line1, sizeof(line1), "Done: -%.1fg", gramsUsed);
+                lcdManager->updateScreen(line1, "Present tag...");
             }
 
-            // Enqueue write request with expected spool ID
+            // Enqueue write request with expected spool ID (fallback if no Spoolman)
             NFCWriteRequest request;
             request.request_id = millis();  // Simple unique ID
             request.type = NFCWriteType::REMOVE_WEIGHT;
@@ -501,34 +573,74 @@ void ApplicationManager::handleSpoolmanSynced(const AppMessage& msg) {
         msg.payload.spoolmanSynced.success ? "true" : "false",
         msg.payload.spoolmanSynced.spoolman_id);
 
-    // Get current spool state for material name
+    // Get current spool state for material name (fallback to cached if tag not on reader)
     char materialName[32] = {0};
     float kgRemaining = msg.payload.spoolmanSynced.kg_remaining;
 
-    CurrentSpoolState state;
-    if (NFCManager::getInstance().getCurrentSpoolState(state) && state.tag_data_valid) {
-        opt_get_material_name(&state.tag_data, materialName, sizeof(materialName));
+    if (msg.payload.spoolmanSynced.material_name[0] != '\0') {
+        strncpy(materialName, msg.payload.spoolmanSynced.material_name, sizeof(materialName) - 1);
+        materialName[sizeof(materialName) - 1] = '\0';
+        strncpy(lastScannedMaterialName, materialName, sizeof(lastScannedMaterialName) - 1);
+        lastScannedMaterialName[sizeof(lastScannedMaterialName) - 1] = '\0';
+    } else {
+        CurrentSpoolState state;
+        if (NFCManager::getInstance().getCurrentSpoolState(state) && state.tag_data_valid) {
+            opt_get_material_name(&state.tag_data, materialName, sizeof(materialName));
+        }
+        if (materialName[0] == '\0' && lastScannedMaterialName[0] != '\0') {
+            strncpy(materialName, lastScannedMaterialName, sizeof(materialName) - 1);
+            materialName[sizeof(materialName) - 1] = '\0';
+        }
     }
 
     if (lcdManager) {
         if (msg.payload.spoolmanSynced.success) {
             char line1[17];
             char line2[17];
-            snprintf(line1, sizeof(line1), "Type: %.10s", materialName);
+            if (lastPrintGramsUsed > 0.0f) {
+                snprintf(line1, sizeof(line1), "Done: -%.1fg", lastPrintGramsUsed);
+                lastPrintGramsUsed = 0.0f;
+            } else if (materialName[0] != '\0') {
+                snprintf(line1, sizeof(line1), "Type: %.10s", materialName);
+            } else {
+                snprintf(line1, sizeof(line1), "Spool #%d", msg.payload.spoolmanSynced.spoolman_id);
+            }
             snprintf(line2, sizeof(line2), "Remain: %.0fg",
                      kgRemaining * 1000.0f);
+            lcdManager->resetHistory();
             lcdManager->updateScreen(line1, line2);
+            tagRemovedAtMs = millis();
         } else {
-            char line1[17];
-            snprintf(line1, sizeof(line1), "Updated: %.0fg",
-                     kgRemaining * 1000.0f);
-            lcdManager->updateScreen(line1, "Spoolman Error");
+            lcdManager->resetHistory();
+            if (lastDisplayedBlankId[0] != '\0') {
+                lcdManager->updateScreen("Unknown Tag", "Use app to setup");
+            } else {
+                char line1[17];
+                snprintf(line1, sizeof(line1), "Updated: %.0fg",
+                         kgRemaining * 1000.0f);
+                lcdManager->updateScreen(line1, "Spoolman Error");
 
-            // Schedule Type/Remain display after 5 seconds even on error
-            if (materialName[0] != '\0') {
-                scheduleTypeRemainDisplay(materialName, kgRemaining);
+                // Schedule Type/Remain display after 5 seconds even on error
+                if (materialName[0] != '\0') {
+                    scheduleTypeRemainDisplay(materialName, kgRemaining);
+                }
             }
         }
+    }
+
+    // Publish synced tag state to HA
+    if (msg.payload.spoolmanSynced.success) {
+        char json[384];
+        snprintf(json, sizeof(json),
+                 "{\"uid\":\"%s\",\"present\":true,\"material_type\":\"%s\","
+                 "\"material_name\":\"%s\",\"color\":\"\",\"manufacturer\":\"\","
+                 "\"remaining_g\":%.1f,\"initial_weight_g\":1000.0,\"spoolman_id\":%d,"
+                 "\"blank\":false}",
+                 msg.payload.spoolmanSynced.spool_id,
+                 materialName, materialName,
+                 kgRemaining * 1000.0f,
+                 msg.payload.spoolmanSynced.spoolman_id);
+        publishToHA("tag/state", json, true);
     }
 
 #ifndef NATIVE_TEST

@@ -3,14 +3,26 @@
 #include <cstring>
 
 LCDManager::LCDManager(uint8_t lcd_Addr, uint8_t lcd_cols, uint8_t lcd_rows)
-    : _lcd(lcd_Addr, lcd_cols, lcd_rows), _lcd_cols(lcd_cols), _messageQueue(nullptr), _taskHandle(nullptr),
+    : _lcd_Addr(lcd_Addr), _lcd_cols(lcd_cols), _lcd_rows(lcd_rows), _lcd(nullptr), _messageQueue(nullptr), _taskHandle(nullptr),
       _activeLineCount(2), _currentPage(0), _lastPageSwitchTimeMs(0), _lastChangeTime(0),
       _screenOff(false), _screenTimeoutMs(DEFAULT_SCREEN_TIMEOUT_MS), _stateMux(portMUX_INITIALIZER_UNLOCKED) {}
 
+LCDManager::~LCDManager() {
+    delete _lcd;
+}
+
+void LCDManager::setAddress(uint8_t addr) {
+    _lcd_Addr = addr;
+}
+
 void LCDManager::begin() {
-    _lcd.init();
-    _lcd.backlight();
-    _lcd.clear();
+    if (_lcd_Addr != 0) {
+        if (_lcd) delete _lcd;
+        _lcd = new LiquidCrystal_I2C(_lcd_Addr, _lcd_cols, _lcd_rows);
+        _lcd->init();
+        _lcd->backlight();
+        _lcd->clear();
+    }
     _messageQueue = xQueueCreate(8, sizeof(ScreenMessage));
     _lastChangeTime = millis();
 }
@@ -40,7 +52,7 @@ void LCDManager::updateScreen(const char* line1, const char* line2) {
     copyLine(msg.line4, displayMsg.line4);
     msg.lineCount = displayMsg.lineCount;
 
-    xQueueSend(_messageQueue, &msg, 0);
+    xQueueSend(_messageQueue, &msg, pdMS_TO_TICKS(10));
 }
 
 void LCDManager::updateScreen(const char* line1, const char* line2, const char* line3, const char* line4) {
@@ -67,7 +79,13 @@ void LCDManager::updateScreen(const char* line1, const char* line2, const char* 
     copyLine(msg.line4, displayMsg.line4);
     msg.lineCount = displayMsg.lineCount;
 
-    xQueueSend(_messageQueue, &msg, 0);
+    xQueueSend(_messageQueue, &msg, pdMS_TO_TICKS(10));
+}
+
+void LCDManager::resetHistory() {
+    taskENTER_CRITICAL(&_stateMux);
+    _displayLogic.reset();
+    taskEXIT_CRITICAL(&_stateMux);
 }
 
 void LCDManager::setScreenTimeoutMs(uint32_t timeoutMs) {
@@ -79,8 +97,8 @@ void LCDManager::setScreenTimeoutMs(uint32_t timeoutMs) {
     taskEXIT_CRITICAL(&_stateMux);
 
     // If the display was off, wake it after timeout changes.
-    if (wasScreenOff) {
-        _lcd.backlight();
+    if (wasScreenOff && _lcd) {
+        _lcd->backlight();
     }
 }
 
@@ -116,10 +134,12 @@ void LCDManager::processQueue() {
         if (strcmp(line1, _currentLine1) != 0) {
             strncpy(_currentLine1, line1, sizeof(_currentLine1) - 1);
             _currentLine1[sizeof(_currentLine1) - 1] = '\0';
-            _lcd.setCursor(0, 0);
-            _lcd.print(_currentLine1);
-            for (size_t i = strlen(_currentLine1); i < _lcd_cols; ++i) {
-                _lcd.print(" ");
+            if (_lcd) {
+                _lcd->setCursor(0, 0);
+                _lcd->print(_currentLine1);
+                for (size_t i = strlen(_currentLine1); i < _lcd_cols; ++i) {
+                    _lcd->print(" ");
+                }
             }
             changed = true;
         }
@@ -127,10 +147,12 @@ void LCDManager::processQueue() {
         if (strcmp(line2, _currentLine2) != 0) {
             strncpy(_currentLine2, line2, sizeof(_currentLine2) - 1);
             _currentLine2[sizeof(_currentLine2) - 1] = '\0';
-            _lcd.setCursor(0, 1);
-            _lcd.print(_currentLine2);
-            for (size_t i = strlen(_currentLine2); i < _lcd_cols; ++i) {
-                _lcd.print(" ");
+            if (_lcd) {
+                _lcd->setCursor(0, 1);
+                _lcd->print(_currentLine2);
+                for (size_t i = strlen(_currentLine2); i < _lcd_cols; ++i) {
+                    _lcd->print(" ");
+                }
             }
             changed = true;
         }
@@ -148,8 +170,8 @@ void LCDManager::processQueue() {
         }
         taskEXIT_CRITICAL(&_stateMux);
 
-        if (wakeScreen) {
-            _lcd.backlight();
+        if (wakeScreen && _lcd) {
+            _lcd->backlight();
         }
     };
 
@@ -239,7 +261,7 @@ void LCDManager::processQueue() {
     taskEXIT_CRITICAL(&_stateMux);
 
     if (!screenOff && timeoutMs > 0 && (millis() - lastChangeTime >= timeoutMs)) {
-        _lcd.noBacklight();
+        if (_lcd) _lcd->noBacklight();
         taskENTER_CRITICAL(&_stateMux);
         _screenOff = true;
         taskEXIT_CRITICAL(&_stateMux);

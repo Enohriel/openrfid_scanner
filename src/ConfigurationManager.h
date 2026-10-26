@@ -29,6 +29,7 @@ public:
     const char* getHAMqttUser() const;
     const char* getHAMqttPass() const;
     uint8_t getAutomationMode() const;
+    uint32_t getBlePin() const;
 
 private:
     ConfigurationManager() = default;
@@ -54,6 +55,7 @@ private:
     char _haMqttUser[64];
     char _haMqttPass[64];
     uint8_t _automationMode;
+    uint32_t _blePin = 123456;
 
     bool _initialized = false;
 

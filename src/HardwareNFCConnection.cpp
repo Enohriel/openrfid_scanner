@@ -130,12 +130,29 @@ void HardwareNFCConnection::setCurrentUid(const uint8_t* uid, uint8_t length) {
 
 bool HardwareNFCConnection::readPage(uint8_t page, uint8_t* buffer4) {
     if (!nfc_) return false;
-    return nfc_->readNtagPage(page, buffer4);
+    for (int retry = 0; retry < 3; retry++) {
+        if (nfc_->readNtagPage(page, buffer4)) return true;
+        delay(2);
+    }
+    return false;
+}
+
+bool HardwareNFCConnection::readBlock(uint8_t startPage, uint8_t* buffer16) {
+    if (!nfc_) return false;
+    for (int retry = 0; retry < 3; retry++) {
+        if (nfc_->mifareBlockRead(startPage, buffer16)) return true;
+        delay(2);
+    }
+    return false;
 }
 
 bool HardwareNFCConnection::writePage(uint8_t page, const uint8_t* data4) {
     if (!nfc_) return false;
-    return nfc_->writeNtagPage(page, data4);
+    for (int retry = 0; retry < 3; retry++) {
+        if (nfc_->writeNtagPage(page, data4)) return true;
+        delay(2);
+    }
+    return false;
 }
 
 void HardwareNFCConnection::logDiagnostics() {

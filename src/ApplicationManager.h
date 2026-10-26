@@ -62,6 +62,7 @@ struct SpoolmanSyncedPayload {
     bool success;
     float kg_remaining;          // Remaining weight for LCD display
     int32_t spoolman_id;         // Resolved Spoolman spool ID (-1 if unknown)
+    char material_name[32];      // Material name resolved from Spoolman
 };
 
 struct TagRemovedPayload {
@@ -119,6 +120,7 @@ public:
     void handleMessage(const AppMessage& msg);
     AppState getState() const { return currentState; }
     const char* getStartingSpoolId() const { return startingSpoolId; }
+    const char* getLastScannedSpoolId() const { return lastScannedSpoolId; }
     int getCurrentJobId() const { return currentJobId; }
     bool hasSpoolChangedDuringPrint() const { return spoolChangedDuringPrint; }
     AutomationMode getAutomationMode() const { return automationMode; }
@@ -127,6 +129,7 @@ public:
     void resetForTest() {
         currentState = AppState::IDLE;
         startingSpoolId[0] = '\0';
+        lastScannedSpoolId[0] = '\0';
         currentJobId = 0;
         spoolChangedDuringPrint = false;
         lastDisplayedSpoolId[0] = '\0';
@@ -155,8 +158,11 @@ private:
     // State machine
     AppState currentState = AppState::IDLE;
     char startingSpoolId[17] = {0};
+    char lastScannedSpoolId[17] = {0};
+    char lastScannedMaterialName[32] = {0};
     int currentJobId = 0;
     bool spoolChangedDuringPrint = false;
+    float lastPrintGramsUsed = 0.0f;
     char lastDisplayedSpoolId[17] = {0};
     char lastDisplayedBlankId[17] = {0};
     bool pendingStatusAfterTagRemoved = false;

@@ -16,6 +16,13 @@ class LCDDisplayLogic {
 public:
     LCDDisplayLogic() : _lastDisplayedLineCount(0), _lastDisplayedSinceMs(0), _hasLastDisplayedMessage(false) {}
 
+    static bool isTransientLine(const char* line) {
+        if (line == nullptr || line[0] == '\0') return false;
+        return (strstr(line, "Syncing") != nullptr ||
+                strstr(line, "syncing") != nullptr ||
+                strstr(line, "Present tag") != nullptr);
+    }
+
     LCDDisplayMessage prepareTwoLineMessage(const char* line1,
                                             const char* line2,
                                             unsigned long nowMs) const {
@@ -29,11 +36,15 @@ public:
         if (_hasLastDisplayedMessage &&
             _lastDisplayedLineCount == 2 &&
             (nowMs - _lastDisplayedSinceMs < RECENT_TWO_LINE_COMBINE_MS)) {
-            copyLine(msg.line1, _lastDisplayedLine1);
-            copyLine(msg.line2, _lastDisplayedLine2);
-            copyLine(msg.line3, line1);
-            copyLine(msg.line4, line2);
-            msg.lineCount = 4;
+            bool prevIsTransient = isTransientLine(_lastDisplayedLine1) || isTransientLine(_lastDisplayedLine2);
+            bool newIsTransient = isTransientLine(line1) || isTransientLine(line2);
+            if (!prevIsTransient && !newIsTransient) {
+                copyLine(msg.line1, _lastDisplayedLine1);
+                copyLine(msg.line2, _lastDisplayedLine2);
+                copyLine(msg.line3, line1);
+                copyLine(msg.line4, line2);
+                msg.lineCount = 4;
+            }
         }
 
         return msg;
@@ -53,6 +64,11 @@ public:
     }
 
     void noteDisplayedMessage(const LCDDisplayMessage& msg, unsigned long nowMs) {
+        if (isTransientLine(msg.line1) || isTransientLine(msg.line2) ||
+            isTransientLine(msg.line3) || isTransientLine(msg.line4)) {
+            reset();
+            return;
+        }
         copyLine(_lastDisplayedLine1, msg.line1);
         copyLine(_lastDisplayedLine2, msg.line2);
         _lastDisplayedLineCount = msg.lineCount;

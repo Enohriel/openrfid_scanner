@@ -627,7 +627,7 @@
                     <div class="section-header" style="margin-top: 1.5rem;">WiFi</div>
                     <div class="form-group">
                         <label for="ssid">WiFi SSID</label>
-                        <input type="text" id="ssid" name="ssid" required>
+                        <input type="text" id="ssid" name="ssid" placeholder="e.g., MyHomeWiFi">
                     </div>
                     <div class="form-group">
                         <label for="wifi_pass">WiFi Password (leave blank to keep existing)</label>
@@ -704,8 +704,21 @@
                         <div id="test-mqtt-result" style="margin-top: 0.5rem; font-size: 0.85rem; display: none;"></div>
                     </div>
 
-                    <div class="button-group">
-                        <button type="submit" id="save-button">Save Configuration</button>
+                    <div class="section-header" style="margin-top: 1.5rem;">Bluetooth Security</div>
+                    <div class="form-group">
+                        <label for="ble_pin">Code PIN Actuel (requis pour enregistrer)</label>
+                        <input type="number" id="ble_pin" name="ble_pin" min="0" max="999999" placeholder="123456" value="123456">
+                        <small style="color: var(--prusa-light-gray); font-size: 0.8rem; margin-top: 0.25rem; display: block;">Code PIN protégeant les modifications par Bluetooth (défaut : 123456).</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="new_ble_pin">Nouveau Code PIN (optionnel)</label>
+                        <input type="number" id="new_ble_pin" name="new_ble_pin" min="0" max="999999" placeholder="Laisser vide pour conserver">
+                        <small style="color: var(--prusa-light-gray); font-size: 0.8rem; margin-top: 0.25rem; display: block;">Renseignez ce champ uniquement si vous souhaitez changer de code PIN.</small>
+                    </div>
+
+                    <div class="button-group" style="display: flex; gap: 0.75rem;">
+                        <button type="button" id="reload-config-btn" class="secondary" style="flex: 1;">Reload Config</button>
+                        <button type="submit" id="save-button" style="flex: 2;">Save Configuration</button>
                     </div>
                 </form>
 
@@ -945,10 +958,16 @@
         const commandQueue = [];
         let isProcessingQueue = false;
 
-        // Queue a command and process if not already processing
-        function enqueueCommand(commandFn) {
+        // Queue a command with timeout and process if not already processing
+        function enqueueCommand(commandFn, timeoutMs = 6000) {
             return new Promise((resolve, reject) => {
-                commandQueue.push({ execute: commandFn, resolve, reject });
+                const wrappedFn = () => Promise.race([
+                    commandFn(),
+                    new Promise((_, rejectTimeout) =>
+                        setTimeout(() => rejectTimeout(new Error(`Command timeout (${timeoutMs}ms)`)), timeoutMs)
+                    )
+                ]);
+                commandQueue.push({ execute: wrappedFn, resolve, reject });
                 processQueue();
             });
         }
@@ -992,6 +1011,10 @@
 
                 btn.classList.add('active');
                 document.getElementById(`tab-${tabId}`).classList.add('active');
+
+                if (tabId === 'settings') {
+                    loadConfig();
+                }
             });
         });
 
@@ -1781,9 +1804,13 @@
         }
 
         async function loadConfig() {
-            if (!configWriteCharacteristic || !configReadCharacteristic) return;
+            if (!configWriteCharacteristic || !configReadCharacteristic) {
+                log('Not connected to device.', 'error', settingsStatusArea);
+                return;
+            }
 
             try {
+                log('Reading configuration from device...', '', settingsStatusArea);
                 const config = await enqueueCommand(async () => {
                     await configWriteCharacteristic.writeValue(
                         textEncoder.encode('{"command":"read_config"}')
@@ -1791,31 +1818,50 @@
 
                     const value = await configReadCharacteristic.readValue();
                     const configJson = textDecoder.decode(value);
+                    console.log('Received config JSON:', configJson);
                     return JSON.parse(configJson);
                 });
 
+                if (!config || typeof config !== 'object') {
+                    throw new Error('Invalid config response');
+                }
+
                 // Populate form
-                document.getElementById('ssid').value = config.ssid || '';
-                document.getElementById('prusa_link_url').value = config.prusa_link_url || '';
-                document.getElementById('prusa_link_api_key').value = config.prusa_link_api_key || '';
-                document.getElementById('spoolman_url').value = config.spoolman_url || '';
-                cachedSpoolmanUrl = config.spoolman_url || '';
-                document.getElementById('poll_interval_ms').value = config.poll_interval_ms || 10000;
+                if (config.ssid !== undefined) document.getElementById('ssid').value = config.ssid;
+                if (config.prusa_link_url !== undefined) document.getElementById('prusa_link_url').value = config.prusa_link_url;
+                const prusaKeyInput = document.getElementById('prusa_link_api_key');
+                prusaKeyInput.value = '';
+                prusaKeyInput.placeholder = config.prusa_link_api_key_set ? '•••••••• (enregistrée)' : 'API Key PrusaLink';
+                if (config.spoolman_url !== undefined) {
+                    document.getElementById('spoolman_url').value = config.spoolman_url;
+                    cachedSpoolmanUrl = config.spoolman_url;
+                }
+                if (config.poll_interval_ms !== undefined) document.getElementById('poll_interval_ms').value = config.poll_interval_ms;
                 const lcdTimeoutMs = config.lcd_timeout_ms ?? 120000;
                 document.getElementById('lcd_timeout_minutes').value = Math.round(lcdTimeoutMs / 60000);
                 document.getElementById('wifi_pass').value = '';
                 document.getElementById('device-version').textContent = config.device_version || 'Unknown';
 
                 // HA fields
-                document.getElementById('ha_enabled').value = config.ha_enabled ? 'true' : 'false';
-                document.getElementById('ha_mqtt_host').value = config.ha_mqtt_host || '';
-                document.getElementById('ha_mqtt_port').value = config.ha_mqtt_port || 1883;
-                document.getElementById('ha_mqtt_user').value = config.ha_mqtt_user || '';
+                if (config.ha_enabled !== undefined) document.getElementById('ha_enabled').value = config.ha_enabled ? 'true' : 'false';
+                if (config.ha_mqtt_host !== undefined) document.getElementById('ha_mqtt_host').value = config.ha_mqtt_host;
+                if (config.ha_mqtt_port !== undefined) document.getElementById('ha_mqtt_port').value = config.ha_mqtt_port;
+                if (config.ha_mqtt_user !== undefined) document.getElementById('ha_mqtt_user').value = config.ha_mqtt_user;
                 document.getElementById('ha_mqtt_pass').value = '';
-                document.getElementById('automation_mode').value = (config.automation_mode || 0).toString();
+                if (config.automation_mode !== undefined) document.getElementById('automation_mode').value = config.automation_mode.toString();
+
+                // BLE Security
+                const currentPin = document.getElementById('ble_pin').value;
+                if (!currentPin) {
+                    document.getElementById('ble_pin').value = '123456';
+                }
+                document.getElementById('new_ble_pin').value = '';
+
+                log('Configuration loaded successfully.', 'success', settingsStatusArea);
 
             } catch (error) {
                 console.error('Failed to load config:', error);
+                log(`Failed to load config: ${error.message || error}`, 'error', settingsStatusArea);
             }
         }
 
@@ -1826,40 +1872,75 @@
                 return;
             }
 
-            const ssid = document.getElementById('ssid').value;
+            const configPayload = { command: 'write_config' };
+
+            const ssid = document.getElementById('ssid').value.trim();
+            if (ssid) configPayload.ssid = ssid;
+
             const wifi_pass = document.getElementById('wifi_pass').value;
-            const prusa_link_url = document.getElementById('prusa_link_url').value;
+            if (wifi_pass) configPayload.wifi_pass = wifi_pass;
+
+            const prusa_link_url = document.getElementById('prusa_link_url').value.trim();
+            if (prusa_link_url) configPayload.prusa_link_url = prusa_link_url;
+
             const prusa_link_api_key = document.getElementById('prusa_link_api_key').value;
-            const spoolman_url = document.getElementById('spoolman_url').value;
-            const poll_interval_ms = parseInt(document.getElementById('poll_interval_ms').value, 10);
-            const lcd_timeout_minutes = parseInt(document.getElementById('lcd_timeout_minutes').value, 10);
-            const ha_enabled = document.getElementById('ha_enabled').value === 'true';
-            const ha_mqtt_host = document.getElementById('ha_mqtt_host').value;
-            const ha_mqtt_port = parseInt(document.getElementById('ha_mqtt_port').value, 10) || 1883;
-            const ha_mqtt_user = document.getElementById('ha_mqtt_user').value;
-            const ha_mqtt_pass = document.getElementById('ha_mqtt_pass').value;
-            const automation_mode = parseInt(document.getElementById('automation_mode').value, 10) || 0;
+            if (prusa_link_api_key) configPayload.prusa_link_api_key = prusa_link_api_key;
 
-            const configPayload = {
-                command: 'write_config',
-                ssid,
-                prusa_link_url,
-                prusa_link_api_key,
-                spoolman_url,
-                poll_interval_ms,
-                lcd_timeout_ms: Number.isFinite(lcd_timeout_minutes) ? Math.max(0, lcd_timeout_minutes) * 60000 : 120000,
-                ha_enabled,
-                ha_mqtt_host,
-                ha_mqtt_port,
-                ha_mqtt_user,
-                automation_mode
-            };
+            const spoolman_url = document.getElementById('spoolman_url').value.trim();
+            if (spoolman_url) configPayload.spoolman_url = spoolman_url;
 
-            if (wifi_pass) {
-                configPayload.wifi_pass = wifi_pass;
+            const pollIntervalStr = document.getElementById('poll_interval_ms').value;
+            if (pollIntervalStr !== '') {
+                const poll_interval_ms = parseInt(pollIntervalStr, 10);
+                if (Number.isFinite(poll_interval_ms)) configPayload.poll_interval_ms = poll_interval_ms;
             }
-            if (ha_mqtt_pass) {
-                configPayload.ha_mqtt_pass = ha_mqtt_pass;
+
+            const lcdTimeoutStr = document.getElementById('lcd_timeout_minutes').value;
+            if (lcdTimeoutStr !== '') {
+                const lcd_timeout_minutes = parseInt(lcdTimeoutStr, 10);
+                if (Number.isFinite(lcd_timeout_minutes)) {
+                    configPayload.lcd_timeout_ms = Math.max(0, lcd_timeout_minutes) * 60000;
+                }
+            }
+
+            const ha_enabled_val = document.getElementById('ha_enabled').value;
+            if (ha_enabled_val) configPayload.ha_enabled = (ha_enabled_val === 'true');
+
+            const ha_mqtt_host = document.getElementById('ha_mqtt_host').value.trim();
+            if (ha_mqtt_host) configPayload.ha_mqtt_host = ha_mqtt_host;
+
+            const haMqttPortStr = document.getElementById('ha_mqtt_port').value;
+            if (haMqttPortStr !== '') {
+                const ha_mqtt_port = parseInt(haMqttPortStr, 10);
+                if (Number.isFinite(ha_mqtt_port)) configPayload.ha_mqtt_port = ha_mqtt_port;
+            }
+
+            const ha_mqtt_user = document.getElementById('ha_mqtt_user').value.trim();
+            if (ha_mqtt_user) configPayload.ha_mqtt_user = ha_mqtt_user;
+
+            const ha_mqtt_pass = document.getElementById('ha_mqtt_pass').value;
+            if (ha_mqtt_pass) configPayload.ha_mqtt_pass = ha_mqtt_pass;
+
+            const autoModeStr = document.getElementById('automation_mode').value;
+            if (autoModeStr !== '') {
+                const automation_mode = parseInt(autoModeStr, 10);
+                if (Number.isFinite(automation_mode)) configPayload.automation_mode = automation_mode;
+            }
+
+            const blePinStr = document.getElementById('ble_pin').value;
+            const pinVal = parseInt(blePinStr, 10);
+            if (Number.isFinite(pinVal)) {
+                configPayload.pin = pinVal;
+            } else {
+                configPayload.pin = 123456;
+            }
+
+            const newPinStr = document.getElementById('new_ble_pin').value;
+            if (newPinStr !== '') {
+                const newPinVal = parseInt(newPinStr, 10);
+                if (Number.isFinite(newPinVal) && newPinVal >= 0 && newPinVal <= 999999) {
+                    configPayload.new_pin = newPinVal;
+                }
             }
 
             try {
@@ -1881,12 +1962,19 @@
                 if (response.status === 'ok') {
                     log('Configuration saved successfully.', 'success', settingsStatusArea);
                     document.getElementById('wifi_pass').value = '';
+                    const prusaKeyInput = document.getElementById('prusa_link_api_key');
+                    prusaKeyInput.value = '';
+                    prusaKeyInput.placeholder = '•••••••• (enregistrée)';
+                    if (newPinStr !== '') {
+                        document.getElementById('ble_pin').value = newPinStr;
+                        document.getElementById('new_ble_pin').value = '';
+                    }
                 } else {
                     throw new Error(response.error || 'Unknown error');
                 }
 
             } catch (error) {
-                log(`Failed to save config: ${error}`, 'error', settingsStatusArea);
+                log(`Failed to save config: ${error.message || error}`, 'error', settingsStatusArea);
             } finally {
                 saveButton.disabled = false;
                 saveButton.textContent = 'Save Configuration';
@@ -2060,6 +2148,8 @@
         // Event Listeners
         connectButton.addEventListener('click', handleConnect);
         configForm.addEventListener('submit', handleSave);
+        const reloadBtn = document.getElementById('reload-config-btn');
+        if (reloadBtn) reloadBtn.addEventListener('click', () => loadConfig());
         document.getElementById('test-spoolman-btn').addEventListener('click', handleTestSpoolman);
         document.getElementById('test-prusalink-btn').addEventListener('click', handleTestPrusalink);
         document.getElementById('test-mqtt-btn').addEventListener('click', handleTestMqtt);

@@ -14,6 +14,7 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include <BLESecurity.h>
 #include "esp_mac.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
@@ -237,12 +238,13 @@ static void process_command(const char* json) {
     else if (strcmp(command, "write_config") == 0) {
         if (ConfigurationManager::getInstance().postConfigUpdate(json)) {
             lcdManager.setScreenTimeoutMs(ConfigurationManager::getInstance().getLcdTimeoutMs());
+            BluetoothManager::getInstance().setBlePin(ConfigurationManager::getInstance().getBlePin());
             ApplicationManager::getInstance().showStatusOnLCD();
             snprintf(s_response_buffer, sizeof(s_response_buffer), "{\"status\":\"ok\"}");
             Serial.printf("%s: Config updated successfully\n", TAG);
         } else {
-            snprintf(s_response_buffer, sizeof(s_response_buffer), "{\"error\":\"Failed to save config\"}");
-            Serial.printf("%s: Config update failed\n", TAG);
+            snprintf(s_response_buffer, sizeof(s_response_buffer), "{\"error\":\"Code PIN invalide ou echec de sauvegarde\"}");
+            Serial.printf("%s: Config update failed - invalid PIN or save error\n", TAG);
         }
     }
     else if (strcmp(command, "list_spools") == 0) {
@@ -255,7 +257,7 @@ static void process_command(const char* json) {
             }
             return;
         }
-        StaticJsonDocument<JSON_RESPONSE_CAPACITY> responseDoc;
+        JsonDocument responseDoc;
 
         if (spool.present && spool.tag_data_valid) {
             JsonObject current = responseDoc["current"].to<JsonObject>();
@@ -681,7 +683,7 @@ static void process_command(const char* json) {
                 Serial.printf("%s: get_spoolman_spool failed - API error for ID %d\n", TAG, cmd.spoolman_id);
             } else {
                 // Build JSON response
-                StaticJsonDocument<JSON_RESPONSE_CAPACITY> responseDoc;
+                JsonDocument responseDoc;
                 responseDoc["spoolman_id"] = details.spoolman_id;
                 responseDoc["material"] = details.material_type;
                 responseDoc["color"] = details.color_hex;
@@ -894,7 +896,7 @@ class WriteCallbacks : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic* pCharacteristic) override {
         std::string value = pCharacteristic->getValue();
         if (value.length() > 0) {
-            //Serial.printf("%s: Write received, len=%d\n", TAG, value.length());
+            Serial.printf("%s: Write received, len=%d: %s\n", TAG, (int)value.length(), value.c_str());
 
             // Protect shared state with mutex
             if (s_ble_command_mutex && xSemaphoreTake(s_ble_command_mutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
@@ -907,9 +909,40 @@ class WriteCallbacks : public BLECharacteristicCallbacks {
     }
 };
 
+/**
+ * @brief Security callbacks for BLE pairing and bonding (SMP)
+ */
+class SecurityCallbacks : public BLESecurityCallbacks {
+    uint32_t onPassKeyRequest() override {
+        uint32_t pin = ConfigurationManager::getInstance().getBlePin();
+        Serial.printf("%s: BLE Passkey requested, returning %06u\n", TAG, pin);
+        return pin;
+    }
+    void onPassKeyNotify(uint32_t pass_key) override {
+        Serial.printf("%s: BLE Passkey notify: %06u\n", TAG, pass_key);
+    }
+    bool onConfirmPIN(uint32_t pin) override {
+        uint32_t expectedPin = ConfigurationManager::getInstance().getBlePin();
+        Serial.printf("%s: BLE Confirm PIN: %06u (expected: %06u)\n", TAG, pin, expectedPin);
+        return pin == expectedPin;
+    }
+    bool onSecurityRequest() override {
+        Serial.printf("%s: BLE Security request received - accepting\n", TAG);
+        return true;
+    }
+    void onAuthenticationComplete(esp_ble_auth_cmpl_t desc) override {
+        if (desc.success) {
+            Serial.printf("%s: BLE Authentication complete - client paired successfully!\n", TAG);
+        } else {
+            Serial.printf("%s: BLE Authentication failed, reason: 0x%02X\n", TAG, desc.fail_reason);
+        }
+    }
+};
+
 // Static callback instances
 static ServerCallbacks s_server_callbacks;
 static WriteCallbacks s_write_callbacks;
+static SecurityCallbacks s_security_callbacks;
 
 // Public API
 
@@ -996,6 +1029,7 @@ bool BluetoothManager::begin() {
         Serial.printf("%s: Failed to create read characteristic\n", TAG);
         return false;
     }
+    s_config_read_char->setAccessPermissions(ESP_GATT_PERM_READ);
 
     // Create config write characteristic (READ + WRITE)
     s_config_write_char = service->createCharacteristic(
@@ -1006,6 +1040,7 @@ bool BluetoothManager::begin() {
         Serial.printf("%s: Failed to create write characteristic\n", TAG);
         return false;
     }
+    s_config_write_char->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE);
     s_config_write_char->setCallbacks(&s_write_callbacks);
 
     // Start service
@@ -1052,6 +1087,12 @@ void BluetoothManager::end() {
     s_is_advertising = false;
 
     Serial.printf("%s: Shutdown complete\n", TAG);
+}
+
+void BluetoothManager::setBlePin(uint32_t pin) {
+    BLESecurity security;
+    security.setStaticPIN(pin);
+    Serial.printf("%s: BLE Passkey dynamically updated to %06u\n", TAG, pin);
 }
 
 bool BluetoothManager::isAdvertising() const {

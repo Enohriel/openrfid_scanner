@@ -10,6 +10,7 @@ public:
 
     bool begin();
     void end();
+    void setBlePin(uint32_t pin);
     bool isAdvertising() const;
     bool isConnected() const;
 

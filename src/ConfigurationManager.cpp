@@ -54,12 +54,16 @@ bool ConfigurationManager::loadFromNVS() {
     }
     if (prefs.isKey("prusa_url")) {
         prefs.getString("prusa_url", _prusaLinkUrl, sizeof(_prusaLinkUrl));
+        size_t l = strlen(_prusaLinkUrl);
+        while (l > 0 && _prusaLinkUrl[l - 1] == '/') _prusaLinkUrl[--l] = '\0';
     }
     if (prefs.isKey("prusa_key")) {
         prefs.getString("prusa_key", _prusaLinkApiKey, sizeof(_prusaLinkApiKey));
     }
     if (prefs.isKey("spoolman_url")) {
         prefs.getString("spoolman_url", _spoolmanUrl, sizeof(_spoolmanUrl));
+        size_t l = strlen(_spoolmanUrl);
+        while (l > 0 && _spoolmanUrl[l - 1] == '/') _spoolmanUrl[--l] = '\0';
     }
     if (prefs.isKey("poll_ms")) {
         _pollIntervalMs = prefs.getUInt("poll_ms", _pollIntervalMs);
@@ -85,6 +89,7 @@ bool ConfigurationManager::loadFromNVS() {
     if (prefs.isKey("auto_mode")) {
         _automationMode = prefs.getUChar("auto_mode", 0);
     }
+    _blePin = prefs.getUInt("ble_pin", 123456);
 
     prefs.end();
     Serial.println("ConfigurationManager: Loaded config from NVS");
@@ -111,6 +116,7 @@ bool ConfigurationManager::saveToNVS() {
     prefs.putString("ha_mqtt_user", _haMqttUser);
     prefs.putString("ha_mqtt_pass", _haMqttPass);
     prefs.putUChar("auto_mode", _automationMode);
+    prefs.putUInt("ble_pin", _blePin);
 
     prefs.end();
     Serial.println("ConfigurationManager: Saved config to NVS");
@@ -122,12 +128,14 @@ size_t ConfigurationManager::readConfig(char* out, size_t outSize) {
         return 0;
     }
 
-    StaticJsonDocument<JSON_CONFIG_CAPACITY> doc;
+    JsonDocument doc;
 
     doc["ssid"] = _ssid;
     // wifi_pass intentionally omitted for security
+    doc["wifi_pass_set"] = (strlen(_wifiPass) > 0);
     doc["prusa_link_url"] = _prusaLinkUrl;
-    doc["prusa_link_api_key"] = _prusaLinkApiKey;
+    // prusa_link_api_key intentionally omitted for security
+    doc["prusa_link_api_key_set"] = (strlen(_prusaLinkApiKey) > 0);
     doc["spoolman_url"] = _spoolmanUrl;
     doc["poll_interval_ms"] = _pollIntervalMs;
     doc["lcd_timeout_ms"] = _lcdTimeoutMs;
@@ -136,7 +144,9 @@ size_t ConfigurationManager::readConfig(char* out, size_t outSize) {
     doc["ha_mqtt_port"] = _haMqttPort;
     doc["ha_mqtt_user"] = _haMqttUser;
     // ha_mqtt_pass intentionally omitted for security
+    doc["ha_mqtt_pass_set"] = (strlen(_haMqttPass) > 0);
     doc["automation_mode"] = _automationMode;
+    doc["pin_protected"] = (_blePin > 0);
     doc["device_version"] = DEVICE_VERSION;
 
     size_t written = serializeJson(doc, out, outSize);
@@ -147,7 +157,7 @@ size_t ConfigurationManager::readConfig(char* out, size_t outSize) {
 }
 
 bool ConfigurationManager::postConfigUpdate(const char* json) {
-    StaticJsonDocument<JSON_CONFIG_CAPACITY> doc;
+    JsonDocument doc;
     DeserializationError error = deserializeJson(doc, json);
 
     if (error) {
@@ -156,26 +166,38 @@ bool ConfigurationManager::postConfigUpdate(const char* json) {
         return false;
     }
 
+    // Verify PIN before allowing any configuration modification
+    if (_blePin > 0) {
+        if (!doc["pin"].is<uint32_t>() || doc["pin"].as<uint32_t>() != _blePin) {
+            Serial.println("ConfigurationManager: Rejected config update - invalid or missing PIN");
+            return false;
+        }
+    }
+
     // Update only fields that are present (ignore "command" field)
     if (doc["ssid"].is<const char*>()) {
         strncpy(_ssid, doc["ssid"].as<const char*>(), sizeof(_ssid) - 1);
         _ssid[sizeof(_ssid) - 1] = '\0';
     }
-    if (doc["wifi_pass"].is<const char*>()) {
+    if (doc["wifi_pass"].is<const char*>() && strlen(doc["wifi_pass"].as<const char*>()) > 0) {
         strncpy(_wifiPass, doc["wifi_pass"].as<const char*>(), sizeof(_wifiPass) - 1);
         _wifiPass[sizeof(_wifiPass) - 1] = '\0';
     }
     if (doc["prusa_link_url"].is<const char*>()) {
         strncpy(_prusaLinkUrl, doc["prusa_link_url"].as<const char*>(), sizeof(_prusaLinkUrl) - 1);
         _prusaLinkUrl[sizeof(_prusaLinkUrl) - 1] = '\0';
+        size_t l = strlen(_prusaLinkUrl);
+        while (l > 0 && _prusaLinkUrl[l - 1] == '/') _prusaLinkUrl[--l] = '\0';
     }
-    if (doc["prusa_link_api_key"].is<const char*>()) {
+    if (doc["prusa_link_api_key"].is<const char*>() && strlen(doc["prusa_link_api_key"].as<const char*>()) > 0) {
         strncpy(_prusaLinkApiKey, doc["prusa_link_api_key"].as<const char*>(), sizeof(_prusaLinkApiKey) - 1);
         _prusaLinkApiKey[sizeof(_prusaLinkApiKey) - 1] = '\0';
     }
     if (doc["spoolman_url"].is<const char*>()) {
         strncpy(_spoolmanUrl, doc["spoolman_url"].as<const char*>(), sizeof(_spoolmanUrl) - 1);
         _spoolmanUrl[sizeof(_spoolmanUrl) - 1] = '\0';
+        size_t l = strlen(_spoolmanUrl);
+        while (l > 0 && _spoolmanUrl[l - 1] == '/') _spoolmanUrl[--l] = '\0';
     }
     if (doc["poll_interval_ms"].is<uint32_t>()) {
         _pollIntervalMs = doc["poll_interval_ms"].as<uint32_t>();
@@ -197,7 +219,7 @@ bool ConfigurationManager::postConfigUpdate(const char* json) {
         strncpy(_haMqttUser, doc["ha_mqtt_user"].as<const char*>(), sizeof(_haMqttUser) - 1);
         _haMqttUser[sizeof(_haMqttUser) - 1] = '\0';
     }
-    if (doc["ha_mqtt_pass"].is<const char*>()) {
+    if (doc["ha_mqtt_pass"].is<const char*>() && strlen(doc["ha_mqtt_pass"].as<const char*>()) > 0) {
         strncpy(_haMqttPass, doc["ha_mqtt_pass"].as<const char*>(), sizeof(_haMqttPass) - 1);
         _haMqttPass[sizeof(_haMqttPass) - 1] = '\0';
     }
@@ -207,6 +229,19 @@ bool ConfigurationManager::postConfigUpdate(const char* json) {
         ApplicationManager::getInstance().setAutomationMode(static_cast<AutomationMode>(_automationMode));
         Serial.printf("ConfigurationManager: Automation mode updated to %s\n",
                       _automationMode == 0 ? "SELF_DIRECTED" : "CONTROLLED_BY_HA");
+    }
+    if (doc["new_pin"].is<uint32_t>()) {
+        uint32_t pin = doc["new_pin"].as<uint32_t>();
+        if (pin <= 999999) {
+            _blePin = pin;
+            Serial.printf("ConfigurationManager: BLE PIN updated to %06u\n", _blePin);
+        }
+    } else if (doc["ble_pin"].is<uint32_t>()) {
+        uint32_t pin = doc["ble_pin"].as<uint32_t>();
+        if (pin <= 999999) {
+            _blePin = pin;
+            Serial.printf("ConfigurationManager: BLE PIN updated to %06u\n", _blePin);
+        }
     }
 
     return saveToNVS();
@@ -262,4 +297,8 @@ const char* ConfigurationManager::getHAMqttPass() const {
 
 uint8_t ConfigurationManager::getAutomationMode() const {
     return _automationMode;
+}
+
+uint32_t ConfigurationManager::getBlePin() const {
+    return _blePin;
 }

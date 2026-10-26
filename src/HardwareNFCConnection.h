@@ -20,6 +20,7 @@ public:
 
     bool readPage(uint8_t page, uint8_t* buffer4) override;
     bool writePage(uint8_t page, const uint8_t* data4) override;
+    bool readBlock(uint8_t startPage, uint8_t* buffer16) override;
 
     // Diagnostics: log RF_STATUS, IRQ_STATUS, SYSTEM_STATUS registers
     void logDiagnostics();

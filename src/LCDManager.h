@@ -19,9 +19,12 @@ struct ScreenMessage {
 class LCDManager {
 public:
     LCDManager(uint8_t lcd_Addr, uint8_t lcd_cols, uint8_t lcd_rows);
+    ~LCDManager();
+    void setAddress(uint8_t addr);
     void begin();
     void updateScreen(const char* line1, const char* line2);
     void updateScreen(const char* line1, const char* line2, const char* line3, const char* line4);
+    void resetHistory();
     void startTask();
     void setScreenTimeoutMs(uint32_t timeoutMs);
 
@@ -30,7 +33,10 @@ private:
     void taskLoop();
     static void taskFunc(void* param);
 
-    LiquidCrystal_I2C _lcd;
+    uint8_t _lcd_Addr;
+    uint8_t _lcd_cols;
+    uint8_t _lcd_rows;
+    LiquidCrystal_I2C* _lcd = nullptr;
     QueueHandle_t _messageQueue;
     TaskHandle_t _taskHandle;
     char _currentLine1[17] = {0};
@@ -42,7 +48,6 @@ private:
     uint8_t _activeLineCount;
     uint8_t _currentPage;
     unsigned long _lastPageSwitchTimeMs;
-    uint8_t _lcd_cols;
     unsigned long _lastChangeTime;
     bool _screenOff;
     uint32_t _screenTimeoutMs;

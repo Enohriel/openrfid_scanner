@@ -1,0 +1,68 @@
+# CONTEXT.md - OpenRFID / OpenSpool Scanner
+
+Ce document définit le vocabulaire du domaine, les règles d'architecture et les invariants techniques du projet **OpenRFID Scanner** (fork de `openprinttag_scanner`).
+
+---
+
+## 1. Vocabulaire du Domaine
+
+- **OpenSpool / OpenRFID** : Standard ouvert de formatage NDEF JSON (`application/json`) sur tags NFC pour bobines de filament 3D (poids initial, restant, matériau, couleur, marque, ID).
+- **OpenPrintTag** : Spécification NFC initiale (généralement sur puces ISO 15693 / I-Code SLIX).
+- **NTAG215 (ISO 14443-A)** : Type de tag NFC haute capacité (504 octets utilisateur, 135 pages de 4 octets) massivement utilisé dans l'écosystème 3D (Snapmaker U1, bobines Sunlu/Polymaker, etc.).
+- **PN5180** : Émetteur-récepteur NFC SPI d'NXP supportant à la fois ISO 14443-A et ISO 15693 avec une puissance RF supérieure aux modules PN532/RC522.
+- **Spoolman** : Gestionnaire de stock de filaments auto-hébergé avec API REST.
+- **PrusaLink** : API HTTP locale embarquée sur les imprimantes Prusa (MK4, MK4S, XL, MINI).
+- **Automation Mode** :
+  - `SELF_DIRECTED` : Mode autonome où le scanner déduit le filament consommé directement dans Spoolman via `PUT /api/v1/spool/{id}/use` en fin d'impression sans action manuelle.
+  - `CONTROLLED` : Mode piloté par Home Assistant ou un orchestrateur MQTT.
+
+---
+
+## 2. Invariants Techniques
+
+1. **Protection des Secrets (SEC-01)** :
+   - `prusa_link_api_key`, `wifi_pass` et `ha_mqtt_pass` ne sont **jamais** renvoyés en clair sur le canal Bluetooth Low Energy.
+   - Les lectures de configuration renvoient des booléens d'état (`prusa_link_api_key_set: true`, etc.).
+   - Toute modification de configuration (`write_config`) exige la fourniture du code PIN applicatif (défaut `123456`).
+   - Mises à jour partielles : seuls les champs non vides fournis par le client écrasent les valeurs existantes.
+
+2. **Lecture NFC Optimisée (ISO 14443-A)** :
+   - Lecture par blocs de 16 octets (`readBlock` commande 0x30) plutôt que page par page (4 octets, 0x30/4) pour diviser le temps de transaction par 4 (~180 ms) et fiabiliser la détection en passage rapide.
+   - Désactivation du CRC matériel en réception RX pour les réponses d'acquittement 4 bits (ACK `0x0A`).
+
+3. **Synchronisation Spoolman & Résilience** :
+   - La recherche de bobine dans Spoolman interroge dans l'ordre : `extra.openrfid_uuid`, `extra.openspool_uuid`, `extra.openprinttag_uuid`, et `extra.card_uids` (gestion des listes multi-UID séparées par des virgules).
+   - Utilisation d'un analyseur JSON en streaming (`htcw_json`) pour éviter les allocations dynamiques massives lors du parcours des listes de bobines.
+
+4. **Stabilité de l'Affichage LCD (16x2 I2C)** :
+   - `LCDDisplayLogic` interdit la fusion ou l'alternance cyclique d'écrans transitoires (`Syncing`, `Present tag`) avec des écrans permanents.
+   - En fin d'impression, l'écran reste fixé sur `Done: -X.Xg` / `Remain: XXXg`.
+
+---
+
+## 3. Câblage Matériel (ESP32 DevKitC V4)
+
+| Périphérique | Broche Composant | Broche ESP32 | Notes |
+| :--- | :--- | :--- | :--- |
+| **PN5180 (SPI)** | +5V (VIN) | 5V / VIN | Partagé avec LCD via splitter |
+| | +3.3V | 3V3 | Logique numérique |
+| | GND | GND | Masse commune |
+| | RST | GPIO 13 (D13) | Reset matériel actif bas |
+| | NSS | GPIO 14 (D14) | SPI Chip Select |
+| | MOSI | GPIO 27 (D27) | Master Out Slave In |
+| | MISO | GPIO 26 (D26) | Master In Slave Out |
+| | SCK | GPIO 25 (D25) | SPI Clock |
+| | BUSY | GPIO 33 (D33) | Signal d'occupation PN5180 |
+| **LCD 16x2 (I2C)** | VCC | 5V / VIN | Alimentation 5V |
+| | GND | GND | Masse |
+| | SDA | GPIO 23 (D23) | I2C Data |
+| | SCL | GPIO 22 (D22) | I2C Clock |
+
+---
+
+## 4. Commandes Utiles
+
+- **Tests unitaires natifs** : `mingw32-make -C test/native`
+- **Compilation firmware** : `pio run`
+- **Flash USB** : `pio run -t upload`
+- **Interface Web de configuration** : `https://enohriel.github.io/openrfid_scanner/` (ou `docs/index.html`)

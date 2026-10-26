@@ -26,3 +26,7 @@ test/native/test_json_pull_helpers
 test/native/test_json_pull_helpers_runner
 test/native/*.exe
 test/native/*.txt
+*.exe
+scratch/
+PLAN.md
+implementation_plan.md

@@ -27,6 +27,14 @@ public:
     // NTAG page read/write (4 bytes per page)
     virtual bool readPage(uint8_t page, uint8_t* buffer4) = 0;
     virtual bool writePage(uint8_t page, const uint8_t* data4) = 0;
+
+    // Read 16-byte block (4 pages) - default fallback to 4x readPage
+    virtual bool readBlock(uint8_t startPage, uint8_t* buffer16) {
+        for (uint8_t i = 0; i < 4; i++) {
+            if (!readPage(startPage + i, buffer16 + (i * 4))) return false;
+        }
+        return true;
+    }
 };
 
 #endif // NFC_CONNECTION_I_H

@@ -20,7 +20,8 @@ public:
 
 private:
     static constexpr size_t BGCODE_BUF_SIZE = 8192;
-    float fetchFilamentFromBgcode(const char* downloadRef);
+    float fetchFilamentFromFilesApi(const char* downloadRef);
+    float fetchFilamentFromBgcode(const char* downloadRef, size_t fileSize = 0);
 
     bool connected = false;
     bool hasJob = false;
@@ -36,6 +37,7 @@ private:
     // Saved download ref for deferred bgcode fetch after print completes
     char savedDownloadRef[160] = {0};
     int savedDownloadRefJobId = -1;
+    size_t savedFileSize = 0;
     uint8_t bgcodeBuf_[BGCODE_BUF_SIZE] = {0};
 
     SemaphoreHandle_t httpMutex_ = nullptr;
