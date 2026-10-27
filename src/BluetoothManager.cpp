@@ -6,6 +6,7 @@
 #include "LCDManager.h"
 #include "ConversionUtils.h"
 #include "SpoolmanManager.h"
+#include "MoonrakerAPIStrategy.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <json.hpp>
@@ -25,6 +26,7 @@
 
 extern SemaphoreHandle_t g_httpMutex;
 extern LCDManager lcdManager;
+extern void updateActivePrinterStrategy();
 
 static const char* TAG = "BluetoothManager";
 
@@ -68,6 +70,7 @@ struct ParsedBleCommand {
     float grams_remaining;
     float initial_weight;
     int32_t spoolman_id;
+    uint8_t printer_type;
     bool has_command;
     bool has_id;
     bool has_type;
@@ -78,6 +81,7 @@ struct ParsedBleCommand {
     bool has_spoolman_id;
     bool has_url;
     bool has_api_key;
+    bool has_printer_type;
     bool has_data;
 };
 
@@ -186,6 +190,11 @@ static bool parseBleCommand(const char* jsonText, ParsedBleCommand& out) {
             out.has_url = readStringValue(reader, out.url, sizeof(out.url));
         } else if (strcmp(field, "api_key") == 0) {
             out.has_api_key = readStringValue(reader, out.api_key, sizeof(out.api_key));
+        } else if (strcmp(field, "printer_type") == 0 &&
+                   reader.node_type() == json_node_type::value &&
+                   (reader.value_type() == json_value_type::real || reader.value_type() == json_value_type::integer)) {
+            out.printer_type = static_cast<uint8_t>(reader.value_int());
+            out.has_printer_type = true;
         } else if (strcmp(field, "data") == 0) {
             out.has_data = readStringValue(reader, out.data, sizeof(out.data));
         }
@@ -237,6 +246,7 @@ static void process_command(const char* json) {
     }
     else if (strcmp(command, "write_config") == 0) {
         if (ConfigurationManager::getInstance().postConfigUpdate(json)) {
+            updateActivePrinterStrategy();
             lcdManager.setScreenTimeoutMs(ConfigurationManager::getInstance().getLcdTimeoutMs());
             BluetoothManager::getInstance().setBlePin(ConfigurationManager::getInstance().getBlePin());
             ApplicationManager::getInstance().showStatusOnLCD();
@@ -632,9 +642,10 @@ static void process_command(const char* json) {
             }
         }
     }
-    else if (strcmp(command, "test_prusalink") == 0) {
+    else if (strcmp(command, "test_prusalink") == 0 || strcmp(command, "test_printer") == 0) {
         const char* url = cmd.has_url ? cmd.url : "";
         const char* apiKey = cmd.has_api_key ? cmd.api_key : "";
+        uint8_t printerType = cmd.has_printer_type ? cmd.printer_type : ConfigurationManager::getInstance().getPrinterType();
         if (strlen(url) == 0) {
             snprintf(s_response_buffer, sizeof(s_response_buffer), "{\"status\":\"error\",\"message\":\"Missing url\"}");
         } else if (xSemaphoreTake(g_httpMutex, pdMS_TO_TICKS(10000)) != pdTRUE) {
@@ -642,8 +653,12 @@ static void process_command(const char* json) {
         } else {
             WiFiClient client;
             HTTPClient http;
-            char testUrl[192];
-            snprintf(testUrl, sizeof(testUrl), "%s/api/v1/status", url);
+            char testUrl[256];
+            if (printerType == static_cast<uint8_t>(PrinterType::MOONRAKER)) {
+                MoonrakerAPIStrategy::buildMoonrakerUrl(testUrl, sizeof(testUrl), url, "/server/info");
+            } else {
+                snprintf(testUrl, sizeof(testUrl), "%s/api/v1/status", url);
+            }
             http.begin(client, testUrl);
             http.setTimeout(5000);
             if (strlen(apiKey) > 0) {
@@ -658,7 +673,7 @@ static void process_command(const char* json) {
                 snprintf(s_response_buffer, sizeof(s_response_buffer),
                     "{\"status\":\"error\",\"message\":\"HTTP %d\",\"code\":%d}", httpCode, httpCode);
             }
-            Serial.printf("%s: test_prusalink %s -> %d\n", TAG, testUrl, httpCode);
+            Serial.printf("%s: test_printer (type=%u) %s -> %d\n", TAG, printerType, testUrl, httpCode);
         }
     }
     else if (strcmp(command, "get_spoolman_spool") == 0) {

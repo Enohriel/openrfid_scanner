@@ -9,7 +9,8 @@
 
 enum class SpoolmanRequestType : uint8_t {
     SYNC = 0,
-    USE_FILAMENT = 1
+    USE_FILAMENT = 1,
+    SET_MOONRAKER_SPOOL = 2
 };
 
 struct SpoolmanSyncRequest {
@@ -43,6 +44,7 @@ public:
     void startTask();
     bool enqueueSync(const SpoolmanSyncRequest& req);
     bool enqueueUseFilament(const char* spool_id, float grams_used);
+    bool enqueueSetMoonrakerSpool(int32_t spoolmanId);
     bool isConfigured() const;
     bool getSpoolDetails(int32_t spoolmanId, SpoolDetails& outDetails);
     void invalidateCachedSpoolmanId(const char* spoolId);
@@ -63,6 +65,7 @@ private:
     void taskLoop();
     bool syncSpool(const SpoolmanSyncRequest& req, int& resolvedSpoolmanId, float& remainingWeightG, char* outMaterial = nullptr, size_t materialSize = 0);
     bool useFilament(const char* spool_id, float grams_used, int& resolvedSpoolmanId, float& newRemainingG);
+    bool notifyMoonrakerActiveSpool(int32_t spoolmanId);
     int32_t lookupCachedSpoolmanId(const char* spoolId) const;
 
     QueueHandle_t syncQueue = nullptr;

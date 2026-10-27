@@ -21,6 +21,7 @@ bool ConfigurationManager::begin() {
     memset(_wifiPass, 0, sizeof(_wifiPass));
     memset(_prusaLinkUrl, 0, sizeof(_prusaLinkUrl));
     memset(_prusaLinkApiKey, 0, sizeof(_prusaLinkApiKey));
+    _printerType = 0;
     memset(_spoolmanUrl, 0, sizeof(_spoolmanUrl));
     _pollIntervalMs = 10000;
     _lcdTimeoutMs = 15 * 60 * 1000; // 15 mins
@@ -59,6 +60,9 @@ bool ConfigurationManager::loadFromNVS() {
     }
     if (prefs.isKey("prusa_key")) {
         prefs.getString("prusa_key", _prusaLinkApiKey, sizeof(_prusaLinkApiKey));
+    }
+    if (prefs.isKey("printer_type")) {
+        _printerType = prefs.getUChar("printer_type", 0);
     }
     if (prefs.isKey("spoolman_url")) {
         prefs.getString("spoolman_url", _spoolmanUrl, sizeof(_spoolmanUrl));
@@ -107,6 +111,7 @@ bool ConfigurationManager::saveToNVS() {
     prefs.putString("wifi_pass", _wifiPass);
     prefs.putString("prusa_url", _prusaLinkUrl);
     prefs.putString("prusa_key", _prusaLinkApiKey);
+    prefs.putUChar("printer_type", _printerType);
     prefs.putString("spoolman_url", _spoolmanUrl);
     prefs.putUInt("poll_ms", _pollIntervalMs);
     prefs.putUInt("lcd_to_ms", _lcdTimeoutMs);
@@ -133,6 +138,7 @@ size_t ConfigurationManager::readConfig(char* out, size_t outSize) {
     doc["ssid"] = _ssid;
     // wifi_pass intentionally omitted for security
     doc["wifi_pass_set"] = (strlen(_wifiPass) > 0);
+    doc["printer_type"] = _printerType;
     doc["prusa_link_url"] = _prusaLinkUrl;
     // prusa_link_api_key intentionally omitted for security
     doc["prusa_link_api_key_set"] = (strlen(_prusaLinkApiKey) > 0);
@@ -182,6 +188,14 @@ bool ConfigurationManager::postConfigUpdate(const char* json) {
     if (doc["wifi_pass"].is<const char*>() && strlen(doc["wifi_pass"].as<const char*>()) > 0) {
         strncpy(_wifiPass, doc["wifi_pass"].as<const char*>(), sizeof(_wifiPass) - 1);
         _wifiPass[sizeof(_wifiPass) - 1] = '\0';
+    }
+    if (doc["printer_type"].is<uint8_t>()) {
+        uint8_t pt = doc["printer_type"].as<uint8_t>();
+        if (pt <= 1) {
+            _printerType = pt;
+            Serial.printf("ConfigurationManager: Printer type updated to %s\n",
+                          _printerType == 0 ? "PRUSALINK" : "MOONRAKER");
+        }
     }
     if (doc["prusa_link_url"].is<const char*>()) {
         strncpy(_prusaLinkUrl, doc["prusa_link_url"].as<const char*>(), sizeof(_prusaLinkUrl) - 1);
@@ -261,6 +275,10 @@ const char* ConfigurationManager::getPrusaLinkURL() const {
 
 const char* ConfigurationManager::getPrusaLinkAPIKey() const {
     return _prusaLinkApiKey;
+}
+
+uint8_t ConfigurationManager::getPrinterType() const {
+    return _printerType;
 }
 
 const char* ConfigurationManager::getSpoolmanURL() const {

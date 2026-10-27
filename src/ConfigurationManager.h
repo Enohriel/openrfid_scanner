@@ -1,10 +1,19 @@
 #ifndef CONFIGURATION_MANAGER_H
 #define CONFIGURATION_MANAGER_H
 
+#ifdef NATIVE_TEST
+#include "platform/NativePlatform.h"
+#else
 #include <Arduino.h>
+#endif
 #include <cstdint>
 
-#define DEVICE_VERSION "0.76 BETA"
+#define DEVICE_VERSION "0.77 BETA"
+
+enum class PrinterType : uint8_t {
+    PRUSALINK = 0,
+    MOONRAKER = 1
+};
 
 class ConfigurationManager {
 public:
@@ -18,6 +27,7 @@ public:
     const char* getWiFiPassword() const;
     const char* getPrusaLinkURL() const;
     const char* getPrusaLinkAPIKey() const;
+    uint8_t getPrinterType() const;
     const char* getSpoolmanURL() const;
     uint32_t getPollIntervalMs() const;
     uint32_t getLcdTimeoutMs() const;
@@ -44,6 +54,7 @@ private:
     char _wifiPass[64];
     char _prusaLinkUrl[128];
     char _prusaLinkApiKey[64];
+    uint8_t _printerType = 0; // 0 = PrusaLink, 1 = Moonraker
     char _spoolmanUrl[128];
     uint32_t _pollIntervalMs;
     uint32_t _lcdTimeoutMs;

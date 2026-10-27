@@ -11,7 +11,8 @@ Ce document définit le vocabulaire du domaine, les règles d'architecture et le
 - **NTAG215 (ISO 14443-A)** : Type de tag NFC haute capacité (504 octets utilisateur, 135 pages de 4 octets) massivement utilisé dans l'écosystème 3D (Snapmaker U1, bobines Sunlu/Polymaker, etc.).
 - **PN5180** : Émetteur-récepteur NFC SPI d'NXP supportant à la fois ISO 14443-A et ISO 15693 avec une puissance RF supérieure aux modules PN532/RC522.
 - **Spoolman** : Gestionnaire de stock de filaments auto-hébergé avec API REST.
-- **PrusaLink** : API HTTP locale embarquée sur les imprimantes Prusa (MK4, MK4S, XL, MINI).
+- **PrusaLink** : API HTTP locale embarquée sur les imprimantes Prusa (MK4, MK4S, XL, MINI) — `printer_type = 0`.
+- **Moonraker** : Serveur d'API HTTP/WebSocket pour Klipper (Mainsail / Fluidd, ex: Ender 3 V3 KE sur port `:7125`) — `printer_type = 1`.
 - **Automation Mode** :
   - `SELF_DIRECTED` : Mode autonome où le scanner déduit le filament consommé directement dans Spoolman via `PUT /api/v1/spool/{id}/use` en fin d'impression sans action manuelle.
   - `CONTROLLED` : Mode piloté par Home Assistant ou un orchestrateur MQTT.
@@ -34,7 +35,11 @@ Ce document définit le vocabulaire du domaine, les règles d'architecture et le
    - La recherche de bobine dans Spoolman interroge dans l'ordre : `extra.openrfid_uuid`, `extra.openspool_uuid`, `extra.openprinttag_uuid`, et `extra.card_uids` (gestion des listes multi-UID séparées par des virgules).
    - Utilisation d'un analyseur JSON en streaming (`htcw_json`) pour éviter les allocations dynamiques massives lors du parcours des listes de bobines.
 
-4. **Stabilité de l'Affichage LCD (16x2 I2C)** :
+4. **Support Multi-Imprimantes (`IPrinterLinkStrategy`)** :
+   - `PrusaLinkAPIStrategy` (`printer_type = 0`, affichage LCD `PL+`) : interroge `/api/v1/status` et `/api/v1/job`.
+   - `MoonrakerAPIStrategy` (`printer_type = 1`, affichage LCD `MR+`, port `:7125` par défaut) : interroge `/printer/objects/query?print_stats&virtual_sdcard`, convertit `print_stats.filament_used` (mm) en grammes selon la densité/diamètre de la bobine scannée (avec repli sur `/server/files/metadata`), et assigne la bobine active dans Mainsail/Fluidd via `POST /server/spoolman/spool_id` (conservée au retrait du tag).
+
+5. **Stabilité de l'Affichage LCD (16x2 I2C)** :
    - `LCDDisplayLogic` interdit la fusion ou l'alternance cyclique d'écrans transitoires (`Syncing`, `Present tag`) avec des écrans permanents.
    - En fin d'impression, l'écran reste fixé sur `Done: -X.Xg` / `Remain: XXXg`.
 

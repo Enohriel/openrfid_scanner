@@ -1,7 +1,11 @@
 #ifndef I_PRINTER_LINK_STRATEGY_H
 #define I_PRINTER_LINK_STRATEGY_H
 
+#ifdef NATIVE_TEST
+#include "platform/NativePlatform.h"
+#else
 #include <Arduino.h>
+#endif
 
 class IPrinterLinkStrategy {
 public:
@@ -15,6 +19,10 @@ public:
     virtual int getJobId() const = 0;
     virtual float getProgress() const = 0;
     virtual float getTotalFilamentGrams() const = 0;
+
+    // Actual filament used in grams if tracked directly by the printer (e.g. Klipper filament_used mm).
+    // Returns <= 0.0f if the printer only provides total job filament estimate.
+    virtual float getUsedFilamentGrams() const { return 0.0f; }
 
     // Job state: "PRINTING", "PAUSED", "FINISHED", "STOPPED", "ERROR", or ""
     virtual const char* getJobState() const = 0;

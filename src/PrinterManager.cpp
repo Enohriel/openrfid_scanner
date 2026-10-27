@@ -13,6 +13,7 @@ void PrinterManager::begin() {
     state = PrinterState::IDLE;
     currentJobId = -1;
     currentJobTotalFilamentG = 0.0f;
+    currentJobUsedFilamentG = 0.0f;
     lastProgressPercent = 0.0f;
     missingJobPollCount = 0;
     Serial.println("PrinterManager: Initialized");
@@ -99,12 +100,16 @@ void PrinterManager::poll() {
     int jobId = strategy->getJobId();
     float progress = strategy->getProgress();
     float totalFilamentG = strategy->getTotalFilamentGrams();
+    float usedFilamentG = strategy->getUsedFilamentGrams();
     const char* jobState = strategy->getJobState();
 
     // State machine logic
     if (state == PrinterState::IDLE) {
         if (strcmp(jobState, "PRINTING") == 0 || strcmp(jobState, "PAUSED") == 0) {
             handleJobDetected(jobId, totalFilamentG);
+            if (usedFilamentG > 0.0f) {
+                currentJobUsedFilamentG = usedFilamentG;
+            }
         }
     } else if (state == PrinterState::TRACKING) {
         // Check if job ID changed (new job while we were tracking)
@@ -113,6 +118,9 @@ void PrinterManager::poll() {
             resolveAndSendJobEnd(currentJobId, lastProgressPercent, false, "job_replaced");
             // Start tracking new job
             handleJobDetected(jobId, totalFilamentG);
+            if (usedFilamentG > 0.0f) {
+                currentJobUsedFilamentG = usedFilamentG;
+            }
             return;
         }
 
@@ -122,6 +130,9 @@ void PrinterManager::poll() {
         // Update stored filament if API still reports it (may become 0 once finished)
         if (totalFilamentG > 0) {
             currentJobTotalFilamentG = totalFilamentG;
+        }
+        if (usedFilamentG > 0.0f) {
+            currentJobUsedFilamentG = usedFilamentG;
         }
 
         if (strcmp(jobState, "FINISHED") == 0) {
@@ -137,6 +148,7 @@ void PrinterManager::handleJobDetected(int jobId, float totalFilamentG) {
     state = PrinterState::TRACKING;
     currentJobId = jobId;
     currentJobTotalFilamentG = totalFilamentG;
+    currentJobUsedFilamentG = 0.0f;
     lastProgressPercent = 0.0f;
     missingJobPollCount = 0;
 
@@ -156,12 +168,12 @@ void PrinterManager::handleJobDetected(int jobId, float totalFilamentG) {
 void PrinterManager::resolveAndSendJobEnd(int jobId, float progressPercent, bool allowDeferredFilament, const char* reason) {
     bool canceled = (progressPercent < 100.0f);
 
-    Serial.printf("PrinterManager: Resolving job %d reason=%s progress=%.1f%% total=%.2fg allow_deferred=%s\n",
-        jobId, reason ? reason : "unknown", progressPercent, currentJobTotalFilamentG,
+    Serial.printf("PrinterManager: Resolving job %d reason=%s progress=%.1f%% total=%.2fg used=%.2fg allow_deferred=%s\n",
+        jobId, reason ? reason : "unknown", progressPercent, currentJobTotalFilamentG, currentJobUsedFilamentG,
         allowDeferredFilament ? "true" : "false");
 
     // Try deferred filament only when explicitly allowed and for this exact job
-    if (currentJobTotalFilamentG <= 0.0f && strategy) {
+    if (currentJobUsedFilamentG <= 0.0f && currentJobTotalFilamentG <= 0.0f && strategy) {
         if (allowDeferredFilament) {
             float deferred = strategy->fetchDeferredFilament(jobId);
             if (deferred > 0.0f) {
@@ -176,7 +188,9 @@ void PrinterManager::resolveAndSendJobEnd(int jobId, float progressPercent, bool
         }
     }
 
-    float filamentUsed = (progressPercent / 100.0f) * currentJobTotalFilamentG;
+    float filamentUsed = (currentJobUsedFilamentG > 0.0f)
+        ? currentJobUsedFilamentG
+        : ((progressPercent / 100.0f) * currentJobTotalFilamentG);
 
     AppMessage msg;
     msg.type = AppMessageType::PRINT_ENDED;
@@ -191,6 +205,7 @@ void PrinterManager::resolveAndSendJobEnd(int jobId, float progressPercent, bool
     state = PrinterState::IDLE;
     currentJobId = -1;
     currentJobTotalFilamentG = 0.0f;
+    currentJobUsedFilamentG = 0.0f;
     lastProgressPercent = 0.0f;
     missingJobPollCount = 0;
 }

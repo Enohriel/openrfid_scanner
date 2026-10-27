@@ -134,6 +134,7 @@ void ApplicationManager::showStatusOnLCD() {
     } else {
         haInd = HomeAssistantManager::getInstance().isConnected() ? '+' : '!';
     }
+    const char* printerPrefix = (config.getPrinterType() == static_cast<uint8_t>(PrinterType::MOONRAKER)) ? "MR" : "PL";
 #else
     // Native tests do not initialize network/BLE integrations.
     char bleInd = '?';
@@ -141,12 +142,13 @@ void ApplicationManager::showStatusOnLCD() {
     char prusaInd = '?';
     char smInd = '?';
     char haInd = '?';
+    const char* printerPrefix = "PL";
 #endif
 
     char line1[17];
     char line2[17];
     snprintf(line1, sizeof(line1), "NFC+ BLE%c Wifi%c", bleInd, wifiInd);
-    snprintf(line2, sizeof(line2), "PL%c SM%c HA%c", prusaInd, smInd, haInd);
+    snprintf(line2, sizeof(line2), "%s%c SM%c HA%c", printerPrefix, prusaInd, smInd, haInd);
     lcdManager->updateScreen(line1, line2);
 }
 
@@ -335,6 +337,9 @@ void ApplicationManager::handleSpoolDetected(const AppMessage& msg) {
         SpoolmanManager::getInstance().isConfigured() &&
         !msg.payload.spoolDetected.suppress_spoolman_sync) {
         enqueueSpoolmanSync(msg.payload.spoolDetected);
+    } else if (msg.payload.spoolDetected.spoolman_id > 0) {
+        // Even if Spoolman sync is skipped or not configured on ESP32, notify Moonraker if tag has spoolman_id
+        SpoolmanManager::getInstance().enqueueSetMoonrakerSpool(msg.payload.spoolDetected.spoolman_id);
     }
 #endif
 }

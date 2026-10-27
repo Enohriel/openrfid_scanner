@@ -2,6 +2,7 @@
 #include "ConfigurationManager.h"
 #include "ApplicationManager.h"
 #include "ConversionUtils.h"
+#include "MoonrakerAPIStrategy.h"
 #include "NFCTypes.h"
 #include <HTTPClient.h>
 #include <WiFiClient.h>
@@ -799,6 +800,67 @@ bool SpoolmanManager::enqueueUseFilament(const char* spool_id, float grams_used)
     return xQueueSend(syncQueue, &req, pdMS_TO_TICKS(100)) == pdTRUE;
 }
 
+bool SpoolmanManager::enqueueSetMoonrakerSpool(int32_t spoolmanId) {
+    if (syncQueue == nullptr || spoolmanId <= 0) {
+        return false;
+    }
+    auto& config = ConfigurationManager::getInstance();
+    if (config.getPrinterType() != static_cast<uint8_t>(PrinterType::MOONRAKER) ||
+        strlen(config.getPrusaLinkURL()) == 0) {
+        return false;
+    }
+    SpoolmanSyncRequest req;
+    memset(&req, 0, sizeof(req));
+    req.type = SpoolmanRequestType::SET_MOONRAKER_SPOOL;
+    req.spoolman_id = spoolmanId;
+    return xQueueSend(syncQueue, &req, pdMS_TO_TICKS(100)) == pdTRUE;
+}
+
+bool SpoolmanManager::notifyMoonrakerActiveSpool(int32_t spoolmanId) {
+    auto& config = ConfigurationManager::getInstance();
+    if (config.getPrinterType() != static_cast<uint8_t>(PrinterType::MOONRAKER) ||
+        strlen(config.getPrusaLinkURL()) == 0 || spoolmanId <= 0) {
+        return false;
+    }
+    if (xSemaphoreTake(httpMutex_, HTTP_MUTEX_TIMEOUT) != pdTRUE) {
+        Serial.println("SpoolmanManager: Could not acquire HTTP mutex for Moonraker spool_id");
+        return false;
+    }
+
+    char url[256];
+    if (!MoonrakerAPIStrategy::buildMoonrakerUrl(url, sizeof(url), config.getPrusaLinkURL(), "/server/spoolman/spool_id")) {
+        xSemaphoreGive(httpMutex_);
+        return false;
+    }
+
+    WiFiClient client;
+    client.setTimeout(5);
+    HTTPClient http;
+    http.useHTTP10(true);
+    http.setReuse(false);
+    http.setTimeout(5000);
+    http.begin(client, url);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Connection", "close");
+    if (strlen(config.getPrusaLinkAPIKey()) > 0) {
+        http.addHeader("X-Api-Key", config.getPrusaLinkAPIKey());
+    }
+
+    char body[48];
+    snprintf(body, sizeof(body), "{\"spool_id\":%d}", static_cast<int>(spoolmanId));
+    int code = http.POST(body);
+    client.stop();
+    http.end();
+    xSemaphoreGive(httpMutex_);
+
+    if (code == 200 || code == 201) {
+        Serial.printf("SpoolmanManager: Set Moonraker active spool_id=%d (HTTP %d)\n", static_cast<int>(spoolmanId), code);
+        return true;
+    }
+    Serial.printf("SpoolmanManager: Moonraker POST /server/spoolman/spool_id failed (HTTP %d)\n", code);
+    return false;
+}
+
 bool SpoolmanManager::isConfigured() const {
     return strlen(ConfigurationManager::getInstance().getSpoolmanURL()) > 0;
 }
@@ -899,6 +961,45 @@ bool SpoolmanManager::useFilament(const char* spool_id, float grams_used, int& r
         return false;
     }
 
+    // In Moonraker mode, if Moonraker's native [spoolman] integration is active (has spool_id set),
+    // Moonraker already deducts filament in real-time during the print!
+    // Check GET /server/spoolman/spool_id: if Moonraker returns 200 with a positive spool_id,
+    // skip the PUT /use deduction and just read the live remaining weight from Spoolman.
+    auto& config = ConfigurationManager::getInstance();
+    if (config.getPrinterType() == static_cast<uint8_t>(PrinterType::MOONRAKER) &&
+        strlen(config.getPrusaLinkURL()) > 0) {
+        char mrUrl[256];
+        if (MoonrakerAPIStrategy::buildMoonrakerUrl(mrUrl, sizeof(mrUrl), config.getPrusaLinkURL(), "/server/spoolman/spool_id")) {
+            WiFiClient mrClient;
+            mrClient.setTimeout(5);
+            HTTPClient mrHttp;
+            mrHttp.useHTTP10(true);
+            mrHttp.setReuse(false);
+            mrHttp.setTimeout(5000);
+            mrHttp.begin(mrClient, mrUrl);
+            if (strlen(config.getPrusaLinkAPIKey()) > 0) {
+                mrHttp.addHeader("X-Api-Key", config.getPrusaLinkAPIKey());
+            }
+            int mrCode = mrHttp.GET();
+            String mrResp = (mrCode == 200) ? mrHttp.getString() : "";
+            mrClient.stop();
+            mrHttp.end();
+
+            if (mrCode == 200 && mrResp.indexOf("\"spool_id\":") >= 0 && mrResp.indexOf("\"spool_id\": null") < 0 && mrResp.indexOf("\"spool_id\":null") < 0) {
+                float liveRemainingG = -1.0f;
+                if (lookupSpoolById(spoolmanId, spool_id, &liveRemainingG, nullptr, 0) && liveRemainingG >= 0.0f) {
+                    resolvedSpoolmanId = spoolmanId;
+                    newRemainingG = liveRemainingG;
+                    storeCachedSpoolmanId(spool_id, spoolmanId);
+                    Serial.printf("SpoolmanManager: Moonraker native [spoolman] active for spool %d; skipped duplicate deduction, live remaining=%.1fg\n",
+                                  spoolmanId, newRemainingG);
+                    xSemaphoreGive(httpMutex_);
+                    return true;
+                }
+            }
+        }
+    }
+
     JsonDocument doc;
     doc["use_weight"] = grams_used;
     String body;
@@ -932,6 +1033,10 @@ void SpoolmanManager::taskLoop() {
     SpoolmanSyncRequest req;
     while (true) {
         if (xQueueReceive(syncQueue, &req, portMAX_DELAY) == pdTRUE) {
+            if (req.type == SpoolmanRequestType::SET_MOONRAKER_SPOOL) {
+                notifyMoonrakerActiveSpool(req.spoolman_id);
+                continue;
+            }
             if (!isConfigured()) {
                 continue;
             }
@@ -975,6 +1080,10 @@ void SpoolmanManager::taskLoop() {
                     sizeof(msg.payload.spoolmanSynced.material_name) - 1);
             msg.payload.spoolmanSynced.material_name[sizeof(msg.payload.spoolmanSynced.material_name) - 1] = '\0';
             ApplicationManager::getInstance().sendMessage(msg);
+
+            if (success && resolvedSpoolmanId > 0) {
+                notifyMoonrakerActiveSpool(resolvedSpoolmanId);
+            }
         }
     }
 }

@@ -2,8 +2,12 @@
 #define PRINTER_MANAGER_H
 
 #include <cstdint>
+#ifdef NATIVE_TEST
+#include "platform/NativePlatform.h"
+#else
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#endif
 #include "IPrinterLinkStrategy.h"
 
 enum class PrinterState {
@@ -35,6 +39,7 @@ private:
     PrinterState state = PrinterState::IDLE;
     int currentJobId = -1;
     float currentJobTotalFilamentG = 0.0f;
+    float currentJobUsedFilamentG = 0.0f;
     float lastProgressPercent = 0.0f;
     uint8_t missingJobPollCount = 0;
 

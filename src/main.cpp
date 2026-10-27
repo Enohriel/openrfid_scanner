@@ -8,6 +8,7 @@
 #include "PrinterManager.h"
 #include "NFCManager.h"
 #include "PrusaLinkAPIStrategy.h"
+#include "MoonrakerAPIStrategy.h"
 #include "SpoolmanManager.h"
 #include "HomeAssistantManager.h"
 #include "StubPrinterLinkStrategy.h"
@@ -19,6 +20,22 @@ SemaphoreHandle_t g_httpMutex = nullptr;
 // LCD I2C pins
 #define LCD_SDA 23
 #define LCD_SCL 22
+
+static PrusaLinkAPIStrategy s_prusaStrategy;
+static MoonrakerAPIStrategy s_moonrakerStrategy;
+
+void updateActivePrinterStrategy() {
+  s_prusaStrategy.setHttpMutex(g_httpMutex);
+  s_moonrakerStrategy.setHttpMutex(g_httpMutex);
+  uint8_t pt = ConfigurationManager::getInstance().getPrinterType();
+  if (pt == static_cast<uint8_t>(PrinterType::MOONRAKER)) {
+    PrinterManager::getInstance().setStrategy(&s_moonrakerStrategy);
+    Serial.println("PrinterManager: Active strategy set to MoonrakerAPIStrategy");
+  } else {
+    PrinterManager::getInstance().setStrategy(&s_prusaStrategy);
+    Serial.println("PrinterManager: Active strategy set to PrusaLinkAPIStrategy");
+  }
+}
 
 // LCD Manager
 LCDManager lcdManager(0x27, 16, 2);
@@ -188,9 +205,7 @@ void setup() {
   NFCManager::getInstance().startScanTask();
 
   // Initialize and start PrinterManager with background polling
-  static PrusaLinkAPIStrategy printerStrategy;
-  printerStrategy.setHttpMutex(g_httpMutex);
-  PrinterManager::getInstance().setStrategy(&printerStrategy);
+  updateActivePrinterStrategy();
   PrinterManager::getInstance().begin();
   PrinterManager::getInstance().startPollingTask();
 
