@@ -61,6 +61,7 @@
     - La bobine active reste mémorisée indéfiniment en mémoire pour enchaîner les impressions successives sans jamais avoir à manipuler la bobine.
   - **Simulateur d'impression intégré (`sim [grams]`) :** Commande série permettant de tester instantanément le cycle complet sans chauffer ni imprimer (ex: commande `sim 2.5` ou script `scratch/simulate_print.py`).
 - **Flash PlatformIO :** Téléversement USB direct sans débrancher aucun câble.
+- **Démarrage NFC & Résilience en impression active :** Tâche `NFCScanTask` lancée immédiatement à la première seconde de boot dans `main.cpp` (avant tout polling réseau), et arrêt instantané du streaming G-code texte dès les premières commandes d'extrusion. Validé en conditions réelles à travers le boîtier avec synchronisation Spoolman instantanée.
 
 ---
 
