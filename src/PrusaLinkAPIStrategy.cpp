@@ -782,12 +782,18 @@ float PrusaLinkAPIStrategy::fetchFilamentFromBgcode(const char* downloadRef, siz
                     inThumbnail = false;
                 }
 
-                if (!inThumbnail && line[0] == ';') {
-                    float parsed = parseBgcodeFilament(reinterpret_cast<const uint8_t*>(line), strlen(line));
-                    if (parsed > 0.0f) {
-                        result = parsed;
-                        Serial.printf("PrusaLinkAPIStrategy: Found filament in line %d: %.2fg ('%s')\n",
-                                      linesRead, result, line);
+                if (!inThumbnail) {
+                    if (line[0] == ';') {
+                        float parsed = parseBgcodeFilament(reinterpret_cast<const uint8_t*>(line), strlen(line));
+                        if (parsed > 0.0f) {
+                            result = parsed;
+                            Serial.printf("PrusaLinkAPIStrategy: Found filament in line %d: %.2fg ('%s')\n",
+                                          linesRead, result, line);
+                            break;
+                        }
+                    } else if (linesRead > 50 && (line[0] == 'G' || line[0] == 'g' || line[0] == 'M' || line[0] == 'm')) {
+                        // Print moves have started - header is complete, stop streaming
+                        Serial.printf("PrusaLinkAPIStrategy: Print moves started at line %d, header finished\n", linesRead);
                         break;
                     }
                 }
@@ -802,7 +808,7 @@ float PrusaLinkAPIStrategy::fetchFilamentFromBgcode(const char* downloadRef, siz
 
             Serial.printf("PrusaLinkAPIStrategy: Text G-code stream finished (%d lines, %d bytes, result=%.2fg)\n",
                           linesRead, totalBytesStreamed, result);
-            if (result > 0.0f) {
+            if (result > 0.0f || code == 200) {
                 break;
             }
         }

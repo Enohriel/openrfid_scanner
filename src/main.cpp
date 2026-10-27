@@ -179,28 +179,20 @@ void setup() {
                   mode == 0 ? "SELF_DIRECTED" : "CONTROLLED_BY_HA");
   }
 
-  // Initialize NFCManager
+  // Initialize and start NFCManager FIRST so scanning is immediately active
   if (!NFCManager::getInstance().begin()) {
     Serial.println("NFCManager init failed - halting");
     lcdManager.updateScreen("NFC FAILED", "");
     while (1) { delay(1000); }
   }
+  NFCManager::getInstance().startScanTask();
 
-  // Initialize and start PrinterManager with stub strategy for testing
-  // To use real PrusaLink API, replace StubPrinterLinkStrategy with PrusaLinkAPIStrategy
-  //static StubPrinterLinkStrategy printerStrategy;
+  // Initialize and start PrinterManager with background polling
   static PrusaLinkAPIStrategy printerStrategy;
   printerStrategy.setHttpMutex(g_httpMutex);
   PrinterManager::getInstance().setStrategy(&printerStrategy);
   PrinterManager::getInstance().begin();
-
-  // One synchronous check before polling task starts (no race condition)
-  printerStrategy.update();
-
   PrinterManager::getInstance().startPollingTask();
-
-  // Start NFC scan task
-  NFCManager::getInstance().startScanTask();
 
   // Start SpoolmanManager task
   SpoolmanManager::getInstance().startTask();
