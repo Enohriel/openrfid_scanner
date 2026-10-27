@@ -81,6 +81,17 @@ void PrinterManager::poll() {
     // Check if there's a job
     if (!strategy->hasActiveJob()) {
         if (state == PrinterState::TRACKING) {
+            const char* st = strategy->getJobState();
+            if (st != nullptr && strcmp(st, "FINISHED") == 0) {
+                resolveAndSendJobEnd(currentJobId, 100.0f, true, "finished");
+                return;
+            }
+            if (st != nullptr &&
+                (strcmp(st, "STOPPED") == 0 || strcmp(st, "CANCELED") == 0 || strcmp(st, "ERROR") == 0)) {
+                resolveAndSendJobEnd(currentJobId, lastProgressPercent, true, "stopped_or_error");
+                return;
+            }
+
             missingJobPollCount++;
             if (missingJobPollCount >= JOB_MISSING_GRACE_POLLS) {
                 Serial.printf("PrinterManager: Job %d missing from API (%u polls)\n",
@@ -106,7 +117,7 @@ void PrinterManager::poll() {
     // State machine logic
     if (state == PrinterState::IDLE) {
         if (strcmp(jobState, "PRINTING") == 0 || strcmp(jobState, "PAUSED") == 0) {
-            handleJobDetected(jobId, totalFilamentG);
+            handleJobDetected(jobId, totalFilamentG, progress);
             if (usedFilamentG > 0.0f) {
                 currentJobUsedFilamentG = usedFilamentG;
             }
@@ -117,7 +128,7 @@ void PrinterManager::poll() {
             // Old job was replaced - treat as canceled
             resolveAndSendJobEnd(currentJobId, lastProgressPercent, false, "job_replaced");
             // Start tracking new job
-            handleJobDetected(jobId, totalFilamentG);
+            handleJobDetected(jobId, totalFilamentG, progress);
             if (usedFilamentG > 0.0f) {
                 currentJobUsedFilamentG = usedFilamentG;
             }
@@ -137,19 +148,19 @@ void PrinterManager::poll() {
 
         if (strcmp(jobState, "FINISHED") == 0) {
             resolveAndSendJobEnd(jobId, 100.0f, true, "finished");
-        } else if (strcmp(jobState, "STOPPED") == 0 || strcmp(jobState, "ERROR") == 0) {
+        } else if (strcmp(jobState, "STOPPED") == 0 || strcmp(jobState, "ERROR") == 0 || strcmp(jobState, "CANCELED") == 0) {
             resolveAndSendJobEnd(jobId, progress, true, "stopped_or_error");
         }
         // PRINTING or PAUSED - continue tracking
     }
 }
 
-void PrinterManager::handleJobDetected(int jobId, float totalFilamentG) {
+void PrinterManager::handleJobDetected(int jobId, float totalFilamentG, float initialProgress) {
     state = PrinterState::TRACKING;
     currentJobId = jobId;
     currentJobTotalFilamentG = totalFilamentG;
     currentJobUsedFilamentG = 0.0f;
-    lastProgressPercent = 0.0f;
+    lastProgressPercent = (initialProgress > 0.0f) ? initialProgress : 0.0f;
     missingJobPollCount = 0;
 
     AppMessage msg;
@@ -161,8 +172,8 @@ void PrinterManager::handleJobDetected(int jobId, float totalFilamentG) {
         Serial.printf("PrinterManager: WARNING - No filament data from API for job %d\n", jobId);
     }
 
-    Serial.printf("PrinterManager: Now tracking job %d (total filament: %.2fg)\n",
-        jobId, totalFilamentG);
+    Serial.printf("PrinterManager: Now tracking job %d (total filament: %.2fg, progress: %.1f%%)\n",
+        jobId, totalFilamentG, lastProgressPercent);
 }
 
 void PrinterManager::resolveAndSendJobEnd(int jobId, float progressPercent, bool allowDeferredFilament, const char* reason) {
@@ -211,10 +222,19 @@ void PrinterManager::resolveAndSendJobEnd(int jobId, float progressPercent, bool
 }
 
 void PrinterManager::handleJobDisappeared() {
-    float progress = (lastProgressPercent >= 95.0f) ? 100.0f : lastProgressPercent;
+    const char* lastState = strategy ? strategy->getJobState() : "";
+    bool printerFinished = (lastState != nullptr && strcmp(lastState, "FINISHED") == 0);
+    bool printerCanceled = (lastState != nullptr &&
+        (strcmp(lastState, "STOPPED") == 0 || strcmp(lastState, "CANCELED") == 0 || strcmp(lastState, "ERROR") == 0));
 
-    Serial.printf("PrinterManager: Job %d disappeared at %.1f%% - treating as %s\n",
-        currentJobId, lastProgressPercent, progress >= 100.0f ? "finished" : "canceled");
+    float progress = lastProgressPercent;
+    if (printerFinished || lastProgressPercent >= 95.0f || (!printerCanceled && lastProgressPercent <= 0.0f)) {
+        progress = 100.0f;
+    }
+
+    Serial.printf("PrinterManager: Job %d disappeared at %.1f%% (printerState='%s') - treating as %s\n",
+        currentJobId, lastProgressPercent, lastState ? lastState : "",
+        progress >= 100.0f ? "finished" : "canceled");
 
     resolveAndSendJobEnd(currentJobId, progress, true, "job_disappeared");
 }

@@ -9,43 +9,17 @@
   #include "platform/NativePlatform.h"
 #endif
 
-// Search a metadata block's key=value pairs for "filament used [g]=<value>"
-static float searchMetadataForFilament(const uint8_t* data, size_t len) {
-    const char* meta = (const char*)data;
-    const char* end = meta + len;
-    const char* needle = "filament used [g]=";
-    const size_t needleLen = 18;
-
-    const char* pos = meta;
-    while (pos <= end - needleLen) {
-        if (memcmp(pos, needle, needleLen) == 0) {
-            const char* valStart = pos + needleLen;
-            char valBuf[32];
-            size_t i = 0;
-            while (valStart + i < end && valStart[i] != '\n' && valStart[i] != '\0' && i < sizeof(valBuf) - 1) {
-                valBuf[i] = valStart[i];
-                i++;
-            }
-            valBuf[i] = '\0';
-            return atof(valBuf);
-        }
-        while (pos < end && *pos != '\n') pos++;
-        if (pos < end) pos++;
-    }
-    return 0.0f;
-}
-
 static const char* findCaseInsensitive(const char* haystack, size_t haystackLen, const char* needle) {
     if (haystack == nullptr || needle == nullptr) return nullptr;
     size_t needleLen = strlen(needle);
-    if (needleLen > haystackLen) return nullptr;
+    if (needleLen == 0 || needleLen > haystackLen) return nullptr;
 
     const char* end = haystack + haystackLen - needleLen;
     for (const char* p = haystack; p <= end; p++) {
         size_t i = 0;
         for (; i < needleLen; i++) {
-            char c1 = tolower(static_cast<unsigned char>(p[i]));
-            char c2 = tolower(static_cast<unsigned char>(needle[i]));
+            char c1 = static_cast<char>(tolower(static_cast<unsigned char>(p[i])));
+            char c2 = static_cast<char>(tolower(static_cast<unsigned char>(needle[i])));
             if (c1 != c2) break;
         }
         if (i == needleLen) {
@@ -59,10 +33,11 @@ static float parseFilamentFromMatch(const char* match, size_t matchKeyLen, const
     const char* p = match + matchKeyLen;
     // Skip spaces / tabs
     while (p < end && (*p == ' ' || *p == '\t')) p++;
-    // Skip ':' or '='
-    if (p < end && (*p == '=' || *p == ':')) {
-        p++;
+    // Require ':' or '=' delimiter so we don't match partial words like "total filament used for wipe tower"
+    if (p >= end || (*p != '=' && *p != ':')) {
+        return 0.0f;
     }
+    p++;
     // Skip spaces / tabs
     while (p < end && (*p == ' ' || *p == '\t')) p++;
 
@@ -80,7 +55,7 @@ static float parseFilamentFromMatch(const char* match, size_t matchKeyLen, const
         // Skip trailing units like 'g' or 'G' or whitespace
         while (p < end && (*p == ' ' || *p == '\t' || *p == 'g' || *p == 'G')) p++;
         if (p < end && *p == ',') {
-            p++; // skip comma
+            p++; // skip comma for multi-extruder lists
             while (p < end && (*p == ' ' || *p == '\t')) p++;
         } else {
             break;
@@ -89,68 +64,196 @@ static float parseFilamentFromMatch(const char* match, size_t matchKeyLen, const
     return total;
 }
 
-static float parseTextGcodeFilament(const uint8_t* data, size_t len) {
+// Search a metadata block's key=value pairs for "total filament used [g]=" or "filament used [g]="
+static float searchMetadataForFilament(const uint8_t* data, size_t len) {
     if (data == nullptr || len == 0) return 0.0f;
-    const char* text = reinterpret_cast<const char*>(data);
-    const char* end = text + len;
+    const char* meta = reinterpret_cast<const char*>(data);
+    const char* end = meta + len;
 
-    // Ordered by specificity (prefer total over individual)
-    static const char* const keys[] = {
+    static const char* const needles[] = {
         "total filament used [g]",
-        "total filament weight [g]",
-        "filament used [g]",
-        "filament weight [g]",
-        "total_filament_used_g",
-        "filament_used_g",
-        "total filament used",
-        "filament weight",
-        "total_filament_used",
-        "filament_used"
+        "filament used [g]"
     };
 
-    for (const char* key : keys) {
+    for (const char* needle : needles) {
+        size_t needleLen = strlen(needle);
+        if (len < needleLen) continue;
+        const char* pos = meta;
+        while (pos <= end - needleLen) {
+            const char* match = findCaseInsensitive(pos, static_cast<size_t>(end - pos), needle);
+            if (match == nullptr) break;
+            // Ensure match is at start of buffer or preceded by newline
+            if (match == meta || *(match - 1) == '\n' || *(match - 1) == '\r') {
+                float val = parseFilamentFromMatch(match, needleLen, end);
+                if (val > 0.0f) {
+                    return val;
+                }
+            }
+            pos = match + needleLen;
+        }
+    }
+    return 0.0f;
+}
+
+float parseGcodeCommentLine(const char* line, size_t len, int& outPriority) {
+    outPriority = 0;
+    if (line == nullptr || len == 0) return 0.0f;
+    const char* end = line + len;
+
+    // Priority 3: Explicit total filament weight in grams
+    static const char* const totalGramKeys[] = {
+        "total filament used [g]",
+        "total filament weight [g]",
+        "total_filament_used_g"
+    };
+    for (const char* key : totalGramKeys) {
         size_t keyLen = strlen(key);
-        const char* match = findCaseInsensitive(text, len, key);
+        const char* match = findCaseInsensitive(line, len, key);
         if (match != nullptr) {
             float val = parseFilamentFromMatch(match, keyLen, end);
             if (val > 0.0f) {
+                outPriority = 3;
                 return val;
             }
         }
     }
 
-    // Fallback: volume [cm3] -> weight (approx 1.24 g/cm3)
+    // Priority 2: Explicit filament weight in grams
+    static const char* const gramKeys[] = {
+        "filament used [g]",
+        "filament weight [g]",
+        "filament_used_g",
+        "total filament used",
+        "filament weight"
+    };
+    for (const char* key : gramKeys) {
+        size_t keyLen = strlen(key);
+        const char* match = findCaseInsensitive(line, len, key);
+        if (match != nullptr) {
+            float val = parseFilamentFromMatch(match, keyLen, end);
+            if (val > 0.0f) {
+                outPriority = 2;
+                return val;
+            }
+        }
+    }
+
+    // Priority 1: Fallback from volume [cm3] or length [mm]
     static const char* const volKeys[] = {
         "total filament used [cm3]",
         "filament used [cm3]"
     };
     for (const char* key : volKeys) {
         size_t keyLen = strlen(key);
-        const char* match = findCaseInsensitive(text, len, key);
+        const char* match = findCaseInsensitive(line, len, key);
         if (match != nullptr) {
             float val = parseFilamentFromMatch(match, keyLen, end);
             if (val > 0.0f) {
+                outPriority = 1;
                 return val * 1.24f;
             }
         }
     }
 
-    // Fallback: length [mm] -> weight (for 1.75mm, ~0.00298 g/mm)
     static const char* const lenKeys[] = {
         "total filament used [mm]",
         "filament used [mm]"
     };
     for (const char* key : lenKeys) {
         size_t keyLen = strlen(key);
-        const char* match = findCaseInsensitive(text, len, key);
+        const char* match = findCaseInsensitive(line, len, key);
         if (match != nullptr) {
             float val = parseFilamentFromMatch(match, keyLen, end);
             if (val > 0.0f) {
+                outPriority = 1;
                 return val * 0.00298f;
             }
         }
     }
+
     return 0.0f;
+}
+
+bool isGcodeConfigBlockStart(const char* line) {
+    if (line == nullptr) return false;
+    return (strstr(line, "CONFIG_BLOCK_START") != nullptr ||
+            strstr(line, "prusaslicer_config = begin") != nullptr ||
+            strstr(line, "bambuslicer_config = begin") != nullptr);
+}
+
+static void processCompletedGcodeLine(GcodeStreamState& st) {
+    st.lineBuf[st.lineLen] = '\0';
+    st.linesRead++;
+
+    if (strstr(st.lineBuf, "thumbnail begin") != nullptr ||
+        strstr(st.lineBuf, "THUMBNAIL_BLOCK_START") != nullptr) {
+        st.inThumbnail = true;
+        return;
+    }
+    if (strstr(st.lineBuf, "thumbnail end") != nullptr ||
+        strstr(st.lineBuf, "THUMBNAIL_BLOCK_END") != nullptr) {
+        st.inThumbnail = false;
+        return;
+    }
+
+    if (st.inThumbnail) {
+        return;
+    }
+
+    const char* p = st.lineBuf;
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    if (*p != ';') {
+        return;
+    }
+
+    if (isGcodeConfigBlockStart(p)) {
+        st.done = true;
+        return;
+    }
+
+    int prio = 0;
+    float val = parseGcodeCommentLine(p, strlen(p), prio);
+    if (val > 0.0f && prio >= st.bestPriority) {
+        st.bestFilamentG = val;
+        st.bestPriority = prio;
+        if (prio == 3) {
+            st.done = true;
+        }
+    }
+}
+
+float feedGcodeStreamChunk(GcodeStreamState& st, const uint8_t* chunk, size_t chunkLen) {
+    if (st.done || chunk == nullptr || chunkLen == 0) {
+        return st.bestFilamentG;
+    }
+
+    for (size_t i = 0; i < chunkLen && !st.done; i++) {
+        char c = static_cast<char>(chunk[i]);
+        if (c == '\r') {
+            continue;
+        }
+        if (c == '\n') {
+            processCompletedGcodeLine(st);
+            st.lineLen = 0;
+            st.lineBuf[0] = '\0';
+        } else if (st.lineLen < sizeof(st.lineBuf) - 1) {
+            st.lineBuf[st.lineLen++] = c;
+        }
+    }
+
+    return st.bestFilamentG;
+}
+
+float finalizeGcodeStream(GcodeStreamState& st) {
+    if (!st.done && st.lineLen > 0) {
+        processCompletedGcodeLine(st);
+        st.lineLen = 0;
+        st.lineBuf[0] = '\0';
+    }
+    st.done = true;
+    return st.bestFilamentG;
 }
 
 float parseBgcodeFilament(const uint8_t* data, size_t len) {
@@ -170,17 +273,25 @@ float parseBgcodeFilament(const uint8_t* data, size_t len) {
 
         size_t offset = 10; // first block header
 
-        while (offset + 12 <= len) {
-            uint16_t blockType, compression;
-            uint32_t uncompressedSize, compressedSize;
+        while (offset + 10 <= len) {
+            uint16_t blockType = 0, compression = 0;
+            uint32_t uncompressedSize = 0, compressedSize = 0;
 
             memcpy(&blockType, data + offset, sizeof(uint16_t));
             memcpy(&compression, data + offset + 2, sizeof(uint16_t));
             memcpy(&uncompressedSize, data + offset + 4, sizeof(uint32_t));
-            memcpy(&compressedSize, data + offset + 8, sizeof(uint32_t));
 
-            // GCode blocks (type 1) have an extra raw_data_size uint32
-            size_t headerSize = (blockType == 1) ? 16 : 12;
+            size_t headerSize = 0;
+            if (compression == 0) {
+                compressedSize = uncompressedSize;
+                // Uncompressed libbgcode header: 8B base + 6B (thumbnail) or 2B (encoding)
+                headerSize = (blockType == 5) ? 14 : 10;
+            } else {
+                if (offset + 12 > len) break;
+                memcpy(&compressedSize, data + offset + 8, sizeof(uint32_t));
+                headerSize = (blockType == 5) ? 18 : 14;
+            }
+
             size_t dataStart = offset + headerSize;
             size_t dataEnd = dataStart + compressedSize;
 
@@ -200,7 +311,6 @@ float parseBgcodeFilament(const uint8_t* data, size_t len) {
                 }
             }
 
-            // If block data extends beyond our buffer, stop scanning
             if (dataEnd > len) {
                 break;
             }
@@ -208,9 +318,12 @@ float parseBgcodeFilament(const uint8_t* data, size_t len) {
             offset = dataEnd + checksumSize;
         }
 
-        return 0.0f;
+        // Fallback: direct scan across the binary header buffer for uncompressed ASCII metadata
+        return searchMetadataForFilament(data + 10, len - 10);
     }
 
-    // 2. ASCII text G-code header (OrcaSlicer, PrusaSlicer, Bambu Studio, Cura, etc.)
-    return parseTextGcodeFilament(data, len);
+    // 2. ASCII text G-code (OrcaSlicer, PrusaSlicer, Bambu Studio, Cura, etc.)
+    GcodeStreamState st;
+    feedGcodeStreamChunk(st, data, len);
+    return finalizeGcodeStream(st);
 }

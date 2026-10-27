@@ -30,8 +30,8 @@ JSON_PULL_HELPERS_TARGET = test_json_pull_helpers_runner
 RAW_WRITE_SRCS = test_raw_write.cpp $(COMMON_NATIVE_SRCS)
 RAW_WRITE_TARGET = test_raw_write_runner
 
-# Moonraker strategy tests
-MOONRAKER_SRCS = test_moonraker_strategy.cpp ../../src/MoonrakerAPIStrategy.cpp ../../src/ConversionUtils.cpp ../../.pio/libdeps/esp32dev/htcw_io/src/source/io_stream.cpp
+# Printer strategy tests (Moonraker + PrusaLink)
+MOONRAKER_SRCS = test_moonraker_strategy.cpp ../../src/MoonrakerAPIStrategy.cpp ../../src/PrusaLinkAPIStrategy.cpp ../../src/BgcodeParser.cpp ../../src/ConversionUtils.cpp ../../.pio/libdeps/esp32dev/htcw_io/src/source/io_stream.cpp
 MOONRAKER_TARGET = test_moonraker_runner
 
 all: $(APP_FLOW_TARGET) $(NFC_READ_TARGET) $(BGCODE_TARGET) $(LCD_MANAGER_TARGET) $(JSON_PULL_HELPERS_TARGET) $(RAW_WRITE_TARGET) $(MOONRAKER_TARGET)

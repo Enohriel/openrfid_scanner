@@ -230,7 +230,7 @@ void setup() {
 }
 
 static void handleSerialCommands() {
-  static char cmdBuf[64];
+  static char cmdBuf[160];
   static size_t cmdLen = 0;
 
   while (Serial.available()) {
@@ -286,6 +286,19 @@ static void handleSerialCommands() {
           Serial.printf("STATUS: AppState=%s, LastSpool=%s, StartingSpool=%s\n",
             app.getState() == AppState::MONITORING_PRINT ? "MONITORING" : "IDLE",
             app.getLastScannedSpoolId(), app.getStartingSpoolId());
+        } else if (strcmp(cmdBuf, "diag") == 0) {
+          s_prusaStrategy.diagnose();
+        } else if (strncmp(cmdBuf, "get ", 4) == 0) {
+          s_prusaStrategy.diagGet(cmdBuf + 4);
+        } else if (strncmp(cmdBuf, "testfile ", 9) == 0) {
+          char* ref = cmdBuf + 9;
+          size_t sz = 0;
+          char* sp = strchr(ref, ' ');
+          if (sp != nullptr) {
+            *sp = '\0';
+            sz = static_cast<size_t>(atol(sp + 1));
+          }
+          s_prusaStrategy.diagTestFile(ref, sz);
         }
       }
       cmdLen = 0;

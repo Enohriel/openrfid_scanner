@@ -2,12 +2,23 @@
 #define PRUSA_LINK_API_STRATEGY_H
 
 #include "IPrinterLinkStrategy.h"
+#include <cstddef>
+#include <cstdint>
+#include <json.hpp>
+
+#ifndef NATIVE_TEST
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#endif
 
 class PrusaLinkAPIStrategy : public IPrinterLinkStrategy {
 public:
+#ifndef NATIVE_TEST
     void setHttpMutex(SemaphoreHandle_t mutex) { httpMutex_ = mutex; }
+    void diagnose();
+    void diagGet(const char* path);
+    void diagTestFile(const char* downloadRef, size_t fileSize);
+#endif
     void update() override;
 
     bool hasActiveJob() const override { return hasJob; }
@@ -17,6 +28,14 @@ public:
     const char* getJobState() const override { return jobState; }
     bool isConnected() const override { return connected; }
     float fetchDeferredFilament(int expectedJobId) override;
+
+    // Pure helpers exposed for unit testing
+    static bool isBgcodePath(const char* downloadRef);
+    static void parseStatusPayload(io::stream& stm, bool& outHasJob, int& outJobId, float& outProgress,
+                                   char* outPrinterState = nullptr, size_t outPrinterStateSize = 0);
+    static void parseJobPayload(io::stream& stm, char* outState, size_t outStateSize, float& outFilamentG,
+                                char* outDownloadRef, size_t outDownloadRefSize, size_t& outFileSize,
+                                float* outProgress = nullptr);
 
 private:
     static constexpr size_t BGCODE_BUF_SIZE = 8192;
@@ -40,7 +59,9 @@ private:
     size_t savedFileSize = 0;
     uint8_t bgcodeBuf_[BGCODE_BUF_SIZE] = {0};
 
+#ifndef NATIVE_TEST
     SemaphoreHandle_t httpMutex_ = nullptr;
+#endif
 };
 
 #endif // PRUSA_LINK_API_STRATEGY_H

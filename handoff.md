@@ -49,9 +49,13 @@
   - Mémorisation de la dernière bobine scannée (`lastScannedSpoolId`) pour conserver l'assignation de la bobine au démarrage de l'impression même si le tag n'est plus posé sur le lecteur.
   - Correction de la construction d'URL PrusaLink (`buildJobUrl` et `hostByName`) pour éliminer les doubles slashes (`//api/v1/job/...`) et les échecs DNS causés par un slash de fin.
   - Résolution immédiate des erreurs HTTP 404/405/204 sur les jobs terminés sans gel de 2 minutes.
-  - Support universel des fichiers G-code texte (`.gcode` OrcaSlicer, PrusaSlicer, Bambu Studio, Cura) et binaires (`.bgcode`) :
+  - Support universel des fichiers G-code texte (`.gcode` / `.GCO` OrcaSlicer, PrusaSlicer, Bambu Studio, Cura) et binaires (`.bgcode` / `.BGC`) :
     - Interrogation prioritaire de l'endpoint natif PrusaLink `/api/v1/files/{storage}/{path}` extrayant les métadonnées pré-calculées (`filament used [g]`) en ~50ms sans téléchargement lourd.
-    - Correction du streaming G-code de repli : suppression de l'interruption prématurée sur `G1` (le résumé OrcaSlicer étant situé en pied de fichier) et filtrage instantané des lignes non-commentaires (`line[0] != ';'`).
+    - Détection des extensions FAT32 8.3 (`.BGC`, `.bgc`) sur clé USB Prusa pour envoyer `Range: bytes=0-16383` aux fichiers `.bgcode` au lieu de lire la fin du fichier.
+    - Correction du streaming G-code par blocs de 8 Ko (`feedGcodeStreamChunk`) : suppression de la régression qui coupait la lecture après 50 lignes sur `G1`, priorité explicite aux clés en grammes (`total filament used [g]` > `filament used [g]` > `[cm3]`/`[mm]`), et arrêt immédiat sur `CONFIG_BLOCK_START`.
+    - **Élimination du blocage TCP Delayed ACK (`250 ms`) entre Prusa MK4S (`nhttp`) et ESP32 (`lwIP`)** : le serveur HTTP embarqué de la Prusa MK4S ignore l'en-tête `Range:` sur les `.gcode` (`HTTP 200` depuis l'octet 0) et envoie des segments de `1024` octets (`< MSS`) en attendant un ACK TCP avant le segment suivant. L'appel immédiat à `tcp_fasttmr()` via `tcpip_try_callback` après chaque lecture multiplie le débit par ~8x (`145 Ko` lus et `2.09g` extraits sur `/usb/TESTFU~1.GCO` en `4,3 s` au lieu de plafonner à `4 Ko/s` et d'expirer à `102 Ko`).
+    - Libération de `httpMutex_` pendant le streaming du fichier pour ne jamais bloquer la synchronisation Spoolman lors d'un scan NFC en début d'impression.
+    - Correction de la gestion de `printer.state` (`FINISHED` / `CANCELED`) et de `lastProgressPercent` dans `PrinterManager` pour éviter un calcul à `0g` ("No filament used") sur les impressions courtes se terminant entre deux polls.
   - **Déduction Spoolman 100% Automatique & Enchaînement des Prints :**
     - Remplacement de l'obligation de re-scanner le tag NFC par un appel API natif Spoolman direct (`PUT /api/v1/spool/{id}/use`) dès la fin de l'impression (`finishPrint`).
     - L'ESP32 déduit automatiquement le poids consommé (`use_weight`) dans Spoolman, recalcule la longueur consommée et met à jour `last_used`.

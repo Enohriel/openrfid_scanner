@@ -32,7 +32,7 @@ private:
 
     static void pollingTaskFunc(void* param);
 
-    void handleJobDetected(int jobId, float totalFilamentG);
+    void handleJobDetected(int jobId, float totalFilamentG, float initialProgress = 0.0f);
     void resolveAndSendJobEnd(int jobId, float progressPercent, bool allowDeferredFilament, const char* reason);
     void handleJobDisappeared();
 

@@ -36,7 +36,7 @@ Ce document définit le vocabulaire du domaine, les règles d'architecture et le
    - Utilisation d'un analyseur JSON en streaming (`htcw_json`) pour éviter les allocations dynamiques massives lors du parcours des listes de bobines.
 
 4. **Support Multi-Imprimantes (`IPrinterLinkStrategy`)** :
-   - `PrusaLinkAPIStrategy` (`printer_type = 0`, affichage LCD `PL+`) : interroge `/api/v1/status` et `/api/v1/job`.
+   - `PrusaLinkAPIStrategy` (`printer_type = 0`, affichage LCD `PL+`) : interroge `/api/v1/status`, `/api/v1/job`, `/api/v1/files/...`, et en repli parse l'en-tête binaire `.bgcode`/`.BGC` ou streame le fichier `.gcode`/`.GCO` par blocs de 8 Ko (`feedGcodeStreamChunk`) jusqu'à `CONFIG_BLOCK_START` en acquittant immédiatement les segments TCP de 1024 octets de `nhttp` (`tcp_fasttmr` via `tcpip_try_callback`) sans bloquer `httpMutex_`.
    - `MoonrakerAPIStrategy` (`printer_type = 1`, affichage LCD `MR+`, port `:7125` par défaut) : interroge `/printer/objects/query?print_stats&virtual_sdcard`, convertit `print_stats.filament_used` (mm) en grammes selon la densité/diamètre de la bobine scannée (avec repli sur `/server/files/metadata`), et assigne la bobine active dans Mainsail/Fluidd via `POST /server/spoolman/spool_id` (conservée au retrait du tag).
 
 5. **Stabilité de l'Affichage LCD (16x2 I2C)** :

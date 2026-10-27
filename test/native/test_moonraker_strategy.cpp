@@ -1,5 +1,6 @@
 #include "platform/NativePlatform.h"
 #include "../../src/MoonrakerAPIStrategy.h"
+#include "../../src/PrusaLinkAPIStrategy.h"
 
 #include <cstdio>
 #include <cstring>
@@ -167,16 +168,92 @@ int test_parse_metadata() {
     return 0;
 }
 
+int test_prusalink_is_bgcode_path() {
+    TEST_ASSERT(PrusaLinkAPIStrategy::isBgcodePath("/usb/SAMPLE~1.BGC"));
+    TEST_ASSERT(PrusaLinkAPIStrategy::isBgcodePath("/usb/sample.bgcode"));
+    TEST_ASSERT(PrusaLinkAPIStrategy::isBgcodePath("/usb/PRINT.BGCODE"));
+    TEST_ASSERT(!PrusaLinkAPIStrategy::isBgcodePath("/usb/TESTFU~1.GCO"));
+    TEST_ASSERT(!PrusaLinkAPIStrategy::isBgcodePath("/usb/test_fumee.gcode"));
+    return 0;
+}
+
+int test_prusalink_status_and_job_parsing() {
+    // 1. Test /api/v1/status where job precedes storage/printer with nested id fields
+    const char* statusPayload = R"({
+        "job": {
+            "id": 42,
+            "progress": 75.5,
+            "time_remaining": 120
+        },
+        "storage": {
+            "id": 999,
+            "path": "/usb/"
+        },
+        "printer": {
+            "state": "PRINTING",
+            "temp_nozzle": 215.0
+        }
+    })";
+    {
+        const_buffer_stream stm(reinterpret_cast<const uint8_t*>(statusPayload), strlen(statusPayload));
+        bool hasJob = false;
+        int jobId = -1;
+        float progress = 0.0f;
+        char printerState[16] = {0};
+        PrusaLinkAPIStrategy::parseStatusPayload(stm, hasJob, jobId, progress, printerState, sizeof(printerState));
+        TEST_ASSERT(hasJob);
+        TEST_ASSERT(jobId == 42);
+        TEST_ASSERT(fabsf(progress - 75.5f) < 0.01f);
+        TEST_ASSERT(strcmp(printerState, "PRINTING") == 0);
+    }
+
+    // 2. Test /api/v1/job where refs precedes size and meta inside file, and file precedes state
+    const char* jobPayload = R"({
+        "id": 42,
+        "progress": 80.0,
+        "file": {
+            "refs": {
+                "icon": "/thumb/s/usb/TESTFU~1.GCO",
+                "download": "/usb/TESTFU~1.GCO"
+            },
+            "name": "TESTFU~1.GCO",
+            "size": 98765,
+            "meta": {
+                "filament used [g]": 9.18
+            }
+        },
+        "state": "PRINTING"
+    })";
+    {
+        const_buffer_stream stm(reinterpret_cast<const uint8_t*>(jobPayload), strlen(jobPayload));
+        char state[16] = {0};
+        char downloadRef[160] = {0};
+        float filamentG = 0.0f;
+        size_t fileSize = 0;
+        float progress = 0.0f;
+        PrusaLinkAPIStrategy::parseJobPayload(stm, state, sizeof(state), filamentG,
+                                              downloadRef, sizeof(downloadRef), fileSize, &progress);
+        TEST_ASSERT(strcmp(state, "PRINTING") == 0);
+        TEST_ASSERT(strcmp(downloadRef, "/usb/TESTFU~1.GCO") == 0);
+        TEST_ASSERT(fileSize == 98765);
+        TEST_ASSERT(fabsf(filamentG - 9.18f) < 0.01f);
+        TEST_ASSERT(fabsf(progress - 80.0f) < 0.01f);
+    }
+
+    return 0;
+}
+
 int main() {
     int passed = 0, failed = 0, total = 0;
 
-    printf("\n=== Moonraker Strategy Tests ===\n\n");
+    printf("\n=== Printer Strategy Tests ===\n\n");
     RUN_TEST(test_url_normalization);
     RUN_TEST(test_parse_printing_query);
     RUN_TEST(test_parse_complete_and_standby);
     RUN_TEST(test_parse_metadata);
+    RUN_TEST(test_prusalink_is_bgcode_path);
+    RUN_TEST(test_prusalink_status_and_job_parsing);
 
     printf("\n=== Results: %d/%d passed ===\n", passed, total);
     return failed > 0 ? 1 : 0;
 }
-
