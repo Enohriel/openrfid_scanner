@@ -1,6 +1,7 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <time.h>
+#include <ArduinoOTA.h>
 
 #include "ConfigurationManager.h"
 #include "BluetoothManager.h"
@@ -81,6 +82,30 @@ void initWiFi() {
       Serial.println("Time obtained");
       //lcdManager.updateScreen("NTP OK", "");
     }
+
+    // Initialize ArduinoOTA
+    char hostName[32];
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(hostName, sizeof(hostName), "OpenPrintTag-%02X%02X", mac[4], mac[5]);
+    ArduinoOTA.setHostname(hostName);
+    ArduinoOTA.onStart([]() {
+      Serial.println("OTA: Update start");
+      lcdManager.updateScreen("OTA Updating...", "Do not unplug");
+    });
+    ArduinoOTA.onEnd([]() {
+      Serial.println("\nOTA: Update complete");
+      lcdManager.updateScreen("OTA Complete", "Rebooting...");
+    });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+      Serial.printf("OTA Progress: %u%%\r", (progress / (total / 100)));
+    });
+    ArduinoOTA.onError([](ota_error_t error) {
+      Serial.printf("OTA Error[%u]\n", error);
+      lcdManager.updateScreen("OTA Error", "Rebooting...");
+    });
+    ArduinoOTA.begin();
+    Serial.printf("ArduinoOTA started (hostname: %s)\n", hostName);
 
     delay(2000);
   } else {
@@ -309,6 +334,7 @@ static void handleSerialCommands() {
 }
 
 void loop() {
+  ArduinoOTA.handle();
   handleSerialCommands();
 
   // Process any pending messages for the application

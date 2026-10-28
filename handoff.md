@@ -89,4 +89,6 @@
 - Tests : `test/native/StubNFCConnection.h`, `test/native/test_nfc_read.cpp`, `test/native/test_raw_write.cpp`, `test/native/Makefile`
 - Bluetooth & Web Config : `src/BluetoothManager.cpp`, `src/ConfigurationManager.cpp`, `docs/index.html` (protection PIN applicatif 6 chiffres, masquage des secrets, rechargement automatique et mises à jour partielles)
 - Support Anycubic ACE RFID : `src/OpenSpoolParser.h`, `src/OpenSpoolParser.cpp`, `test/native/test_nfc_read.cpp` (décodage natif binaire Magic `7B 00 65 00`, extraction marque `Anycubic`, type `PETG`, couleur ABGR, températures et création automatique Spoolman)
-
+  - **Mise à Jour OTA Sans Fil (ArduinoOTA) :**
+    - Partitionnement dual-bank 4 Mo (`app0` et `app1` de 1,93 Mo).
+    - Validation du téléversement sans fil direct via PlatformIO (`pio run -e esp32-ender-ota -t upload` sur `192.168.1.71`) avec reboot automatique sur la banque inactive.

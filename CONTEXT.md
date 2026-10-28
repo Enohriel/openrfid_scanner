@@ -49,6 +49,11 @@ Ce document définit le vocabulaire du domaine, les règles d'architecture et le
    - Intervalles de connexion publicitaires : `setMinPreferred(0x06)` (7.5ms) et `setMaxPreferred(0x12)` (22.5ms).
    - L'interface Web Bluetooth (`docs/index.html`) applique un délai de stabilisation de 400ms après `gatt.connect()` et jusqu'à 3 tentatives de découverte de service pour s'adapter au cache WinRT sous Windows/Chromium sans drop GATT prématuré.
 
+7. **Mise à Jour Sans Fil (OTA - Over-The-Air)** :
+   - Partitionnement dual-bank 4 Mo : `app0` (`0x10000`, 1,93 Mo) et `app1` (`0x200000`, 1,93 Mo) gérés par `otadata`.
+   - `ArduinoOTA` initialisé sur le réseau local après connexion Wi-Fi avec affichage d'état sur l'écran LCD (`OTA Updating... / Do not unplug`).
+   - Environnements dédiés PlatformIO : `esp32-prusa-ota` (`192.168.1.80`) et `esp32-ender-ota` (`192.168.1.71`).
+
 ---
 
 ## 3. Câblage Matériel (ESP32 DevKitC V4)
