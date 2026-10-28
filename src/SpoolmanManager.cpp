@@ -17,6 +17,55 @@ static constexpr size_t JSON_MEDIUM_CAPACITY = 768;
 using namespace io;
 using namespace json;
 
+#ifndef NATIVE_TEST
+class arduino_buffered_stream : public io::stream {
+    Stream& m_stream;
+    uint8_t m_buf[512];
+    size_t m_bufLen;
+    size_t m_bufPos;
+    unsigned long long m_pos;
+    unsigned long m_timeoutMs;
+public:
+    arduino_buffered_stream(Stream& s, unsigned long timeoutMs = 5000)
+        : m_stream(s), m_bufLen(0), m_bufPos(0), m_pos(0), m_timeoutMs(timeoutMs) {}
+
+    virtual int getch() override {
+        if (m_bufPos >= m_bufLen) {
+            unsigned long deadline = millis() + m_timeoutMs;
+            while (!m_stream.available() && millis() < deadline) {
+                delay(1);
+            }
+            int avail = m_stream.available();
+            if (avail <= 0) return -1;
+            int toRead = avail > (int)sizeof(m_buf) ? (int)sizeof(m_buf) : avail;
+            int n = m_stream.readBytes(m_buf, toRead);
+            if (n <= 0) return -1;
+            m_bufLen = (size_t)n;
+            m_bufPos = 0;
+        }
+        m_pos++;
+        return m_buf[m_bufPos++];
+    }
+    virtual size_t read(uint8_t* destination, size_t size) override {
+        size_t total = 0;
+        while (total < size) {
+            int c = getch();
+            if (c < 0) break;
+            destination[total++] = (uint8_t)c;
+        }
+        return total;
+    }
+    virtual int putch(int) override { return -1; }
+    virtual size_t write(const uint8_t*, size_t) override { return 0; }
+    virtual unsigned long long seek(long long, io::seek_origin) override { return m_pos; }
+    virtual io::stream_caps caps() const override {
+        io::stream_caps c;
+        c.read = 1; c.write = 0; c.seek = 0;
+        return c;
+    }
+};
+#endif
+
 static bool readIntValue(json_reader& reader, int& outValue) {
     if (reader.node_type() != json_node_type::value) {
         return false;
@@ -163,9 +212,8 @@ static bool parseFirstArrayItemId(const char* jsonText, int& outId) {
     return false;
 }
 
-static bool parseSpoolIdByUuid(const char* jsonText, const char* uuid, int& outId) {
+static bool parseSpoolIdByUuid(io::stream& stm, const char* uuid, int& outId) {
     outId = -1;
-    const_buffer_stream stm((const uint8_t*)jsonText, strlen(jsonText));
     json_reader reader(stm);
 
     while (reader.read()) {
@@ -208,6 +256,12 @@ static bool parseSpoolIdByUuid(const char* jsonText, const char* uuid, int& outI
         }
     }
     return false;
+}
+
+static bool parseSpoolIdByUuid(const char* jsonText, const char* uuid, int& outId) {
+    if (jsonText == nullptr) return false;
+    const_buffer_stream stm((const uint8_t*)jsonText, strlen(jsonText));
+    return parseSpoolIdByUuid(stm, uuid, outId);
 }
 
 static bool parseSpoolUuid(const char* jsonText, char* outUuid, size_t outUuidSize) {
@@ -431,6 +485,8 @@ static int findOrCreateFilament(int vendorId, const SpoolmanSyncRequest& req) {
     return -1;
 }
 
+static int findSpoolByUuidGlobal(const char* uuid);
+
 static int findSpoolByUuid(int filamentId, const char* uuid) {
     char path[128];
     snprintf(path, sizeof(path), "/api/v1/spool?filament.id=%d", filamentId);
@@ -447,18 +503,7 @@ static int findSpoolByUuid(int filamentId, const char* uuid) {
 
     // Fallback search across all spools to avoid duplicate UUID entries when
     // a prior sync used different filament metadata for the same physical tag.
-    response = "";
-    code = httpGet("/api/v1/spool", response);
-    if (code == 200) {
-        int id = -1;
-        if (parseSpoolIdByUuid(response.c_str(), uuid, id)) {
-            Serial.printf("SpoolmanManager: Found spool uuid=%s id=%d via global lookup\n",
-                          uuid, id);
-            return id;
-        }
-    }
-
-    return -1;
+    return findSpoolByUuidGlobal(uuid);
 }
 
 static int createSpool(int filamentId, const SpoolmanSyncRequest& req) {
@@ -537,23 +582,46 @@ static bool lookupSpoolById(int spoolId, const char* uuid, float* outRemainingWe
 }
 
 static int findSpoolByUuidGlobal(const char* uuid) {
-    String response;
-    int code = httpGet("/api/v1/spool", response);
+#ifndef NATIVE_TEST
+    const char* baseUrl = ConfigurationManager::getInstance().getSpoolmanURL();
+    WiFiClient client;
+    client.setTimeout(10);
+    HTTPClient http;
+    http.useHTTP10(true);
+    http.setReuse(false);
+    http.setTimeout(10000);
+
+    char url[256];
+    snprintf(url, sizeof(url), "%s/api/v1/spool", baseUrl);
+    http.begin(client, url);
+    http.addHeader("Connection", "close");
+    int code = http.GET();
     if (code != 200) {
         Serial.printf("SpoolmanManager: findSpoolByUuidGlobal httpGet returned %d\n", code);
+        client.stop();
+        http.end();
         return -1;
     }
 
+    WiFiClient& stream = http.getStream();
+    arduino_buffered_stream stm(stream);
     int id = -1;
-    if (parseSpoolIdByUuid(response.c_str(), uuid, id)) {
-        Serial.printf("SpoolmanManager: Recovered spool uuid=%s id=%d via global lookup\n",
+    bool found = parseSpoolIdByUuid(stm, uuid, id);
+    client.stop();
+    http.end();
+
+    if (found && id >= 0) {
+        Serial.printf("SpoolmanManager: Recovered spool uuid=%s id=%d via global stream lookup\n",
                       uuid, id);
         return id;
     }
 
-    Serial.printf("SpoolmanManager: UUID %s not matched in global spools list (%d bytes)\n",
-                  uuid, (int)response.length());
+    Serial.printf("SpoolmanManager: UUID %s not matched in global spools list\n", uuid);
     return -1;
+#else
+    (void)uuid;
+    return -1;
+#endif
 }
 
 static bool updateSpool(int spoolId, int filamentId, float remainingWeight) {

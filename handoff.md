@@ -58,6 +58,12 @@
     - Correction de la gestion de `printer.state` (`FINISHED` / `CANCELED`) et de `lastProgressPercent` dans `PrinterManager` pour éviter un calcul à `0g` ("No filament used") sur les impressions courtes se terminant entre deux polls.
   - **Déduction Spoolman 100% Automatique & Enchaînement des Prints :**
     - Remplacement de l'obligation de re-scanner le tag NFC par un appel API natif Spoolman direct (`PUT /api/v1/spool/{id}/use`) dès la fin de l'impression (`finishPrint`).
+  - **Support Bobines Anycubic ACE & Lookup Spoolman Zéro-Allocation :**
+    - Décodage natif binaire Anycubic ACE (Magic `7B 00 65 00`, SKU, marque `AC` -> `Anycubic`, matériau, couleur ABGR, températures, poids).
+    - Décodage streaming sans allocation heap (`arduino_buffered_stream` sur pile de 512 octets) de `/api/v1/spool` pour éliminer les plantages de heap de l'ESP32 sur bases volumineuses (> 40 bobines).
+  - **Résilience BLE & Web Bluetooth (Windows) :**
+    - Correction de l'intervalle de connexion BLE publicitaire (`setMaxPreferred(0x12)` au lieu du doublon `setMinPreferred`).
+    - Web App (`docs/index.html`) durcie avec délai de stabilisation WinRT (400ms) et jusqu'à 3 tentatives automatiques pour éliminer l'erreur `GATT Server is disconnected. Cannot retrieve services`.
     - L'ESP32 déduit automatiquement le poids consommé (`use_weight`) dans Spoolman, recalcule la longueur consommée et met à jour `last_used`.
     - **Affichage LCD stable (sans carrousel parasite) :** Correction de `LCDDisplayLogic` pour interdire la fusion des écrans transitoires (`"Syncing"`, `"Present tag"`). L'écran n'alterne plus en boucle : dès la fin de la synchronisation Spoolman, il affiche de manière fixe :
       - Ligne 1 : `Done: -X.Xg`
@@ -77,9 +83,10 @@
 - Cycle d'application : `src/ApplicationManager.h`, `src/ApplicationManager.cpp` (gestion cycle automatique Spoolman, conservation spool active)
 - PrusaLink : `src/PrusaLinkAPIStrategy.h`, `src/PrusaLinkAPIStrategy.cpp` (extraction poids via /files API & streaming G-code sans coupure)
 - Configuration : `src/ConfigurationManager.cpp`
-- Spoolman : `src/SpoolmanManager.h`, `src/SpoolmanManager.cpp` (implémentation `httpPut`, `enqueueUseFilament`, `useFilament` via `/api/v1/spool/{id}/use`)
+- Spoolman : `src/SpoolmanManager.h`, `src/SpoolmanManager.cpp` (implémentation `httpPut`, `enqueueUseFilament`, `useFilament` via `/api/v1/spool/{id}/use`, et recherche globale en streaming zéro-allocation `arduino_buffered_stream` sur `/api/v1/spool` pour bases de données volumineuses)
 - Utilitaires : `src/ConversionUtils.cpp`
 - Script de simulation : `scratch/simulate_print.py`, `scratch/monitor_live.py`
 - Tests : `test/native/StubNFCConnection.h`, `test/native/test_nfc_read.cpp`, `test/native/test_raw_write.cpp`, `test/native/Makefile`
 - Bluetooth & Web Config : `src/BluetoothManager.cpp`, `src/ConfigurationManager.cpp`, `docs/index.html` (protection PIN applicatif 6 chiffres, masquage des secrets, rechargement automatique et mises à jour partielles)
+- Support Anycubic ACE RFID : `src/OpenSpoolParser.h`, `src/OpenSpoolParser.cpp`, `test/native/test_nfc_read.cpp` (décodage natif binaire Magic `7B 00 65 00`, extraction marque `Anycubic`, type `PETG`, couleur ABGR, températures et création automatique Spoolman)
 

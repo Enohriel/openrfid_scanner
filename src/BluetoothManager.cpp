@@ -895,10 +895,25 @@ class ServerCallbacks : public BLEServerCallbacks {
         Serial.printf("%s: Client connected\n", TAG);
     }
 
+    void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) override {
+        s_is_connected = true;
+        s_is_advertising = false;
+        s_response_buffer[0] = '\0';
+        Serial.printf("%s: Client connected, conn_id=%u\n", TAG, param->connect.conn_id);
+    }
+
     void onDisconnect(BLEServer* pServer) override {
         s_is_connected = false;
         Serial.printf("%s: Client disconnected, restarting advertising\n", TAG);
         // Restart advertising
+        BLEDevice::startAdvertising();
+        s_is_advertising = true;
+    }
+
+    void onDisconnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) override {
+        s_is_connected = false;
+        Serial.printf("%s: Client disconnected, conn_id=%u, reason=0x%02x, restarting advertising\n",
+                      TAG, param->disconnect.conn_id, param->disconnect.reason);
         BLEDevice::startAdvertising();
         s_is_advertising = true;
     }
@@ -1067,7 +1082,7 @@ bool BluetoothManager::begin() {
     advertising->addServiceUUID(SERVICE_UUID);
     advertising->setScanResponse(true);
     advertising->setMinPreferred(0x06);
-    advertising->setMinPreferred(0x12);
+    advertising->setMaxPreferred(0x12);
     BLEDevice::startAdvertising();
     s_is_advertising = true;
 

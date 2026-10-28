@@ -47,8 +47,156 @@ static double extractNumberValue(const char* valStart) {
     return strtod(valStart, &endPtr);
 }
 
+bool OpenSpoolParser::isAnycubicPayload(const uint8_t* memory, size_t len) {
+    if (!memory || len < 4) return false;
+    // Page 4 magic header: 0x7B, 0x00 (little endian 0x007B = 123)
+    return (memory[0] == 0x7B && memory[1] == 0x00);
+}
+
+bool OpenSpoolParser::parseAnycubicPayload(const uint8_t* memory, size_t len, OpenSpoolData* outData) {
+    if (!memory || len < 20 || !outData) return false;
+    if (!isAnycubicPayload(memory, len)) return false;
+
+    memset(outData, 0, sizeof(OpenSpoolData));
+    strcpy(outData->protocol, "anycubic_ace");
+    strcpy(outData->version, "2.0");
+    outData->spoolman_id = -1;
+    outData->diameter = 1.75f;
+    outData->total_weight = 1000.0f;
+    outData->remaining_weight = 1000.0f;
+
+    // Pages 5-9 (offsets 4..23, 20 bytes): SKU
+    char sku[24] = {0};
+    if (len >= 24) {
+        size_t copyLen = 20;
+        if (copyLen > sizeof(sku) - 1) copyLen = sizeof(sku) - 1;
+        memcpy(sku, &memory[4], copyLen);
+        sku[copyLen] = '\0';
+    }
+
+    // Pages 10-14 (offsets 24..43, 20 bytes): Brand
+    char brand[24] = {0};
+    if (len >= 44) {
+        size_t copyLen = 20;
+        if (copyLen > sizeof(brand) - 1) copyLen = sizeof(brand) - 1;
+        memcpy(brand, &memory[24], copyLen);
+        brand[copyLen] = '\0';
+    }
+    // Trim non-printable and spaces
+    for (int i = (int)strlen(brand) - 1; i >= 0 && (unsigned char)brand[i] <= ' '; i--) {
+        brand[i] = '\0';
+    }
+    if (strcasecmp(brand, "AC") == 0 || brand[0] == '\0') {
+        strcpy(outData->brand, "Anycubic");
+    } else {
+        strncpy(outData->brand, brand, sizeof(outData->brand) - 1);
+    }
+
+    // Pages 15-19 (offsets 44..63, 20 bytes): Material Type
+    char type[24] = {0};
+    if (len >= 64) {
+        size_t copyLen = 20;
+        if (copyLen > sizeof(type) - 1) copyLen = sizeof(type) - 1;
+        memcpy(type, &memory[44], copyLen);
+        type[copyLen] = '\0';
+    }
+    for (int i = (int)strlen(type) - 1; i >= 0 && (unsigned char)type[i] <= ' '; i--) {
+        type[i] = '\0';
+    }
+    if (type[0] != '\0') {
+        strncpy(outData->type, type, sizeof(outData->type) - 1);
+    } else {
+        strcpy(outData->type, "PLA");
+    }
+    outData->material_type = materialTypeFromString(outData->type);
+    outData->density = getDefaultDensity(outData->material_type);
+
+    // Page 20 (offsets 64..67, 4 bytes): Color in ABGR format [Alpha, Blue, Green, Red]
+    if (len >= 68) {
+        uint8_t a = memory[64];
+        uint8_t b = memory[65];
+        uint8_t g = memory[66];
+        uint8_t r = memory[67];
+        if (r != 0 || g != 0 || b != 0 || a != 0) {
+            snprintf(outData->color_hex, sizeof(outData->color_hex), "#%02X%02X%02X", r, g, b);
+            outData->color_rgba[0] = r;
+            outData->color_rgba[1] = g;
+            outData->color_rgba[2] = b;
+            outData->color_rgba[3] = (a > 0) ? a : 255;
+        } else {
+            strcpy(outData->color_hex, "#FFFFFF");
+            outData->color_rgba[0] = 255;
+            outData->color_rgba[1] = 255;
+            outData->color_rgba[2] = 255;
+            outData->color_rgba[3] = 255;
+        }
+    } else {
+        strcpy(outData->color_hex, "#FFFFFF");
+        outData->color_rgba[0] = 255;
+        outData->color_rgba[1] = 255;
+        outData->color_rgba[2] = 255;
+        outData->color_rgba[3] = 255;
+    }
+
+    // Default temperatures based on material
+    if (outData->material_type == OPT_MATERIAL_TYPE_PETG) {
+        outData->min_temp = 230;
+        outData->max_temp = 250;
+        outData->bed_temp = 70;
+    } else if (outData->material_type == OPT_MATERIAL_TYPE_ABS || outData->material_type == OPT_MATERIAL_TYPE_ASA) {
+        outData->min_temp = 240;
+        outData->max_temp = 260;
+        outData->bed_temp = 90;
+    } else {
+        outData->min_temp = 200;
+        outData->max_temp = 220;
+        outData->bed_temp = 60;
+    }
+
+    // Page 24 (offsets 80..83, 4 bytes): Extruder temp min/max (uint16_t LE each)
+    if (len >= 84) {
+        uint16_t min_t = (uint16_t)memory[80] | ((uint16_t)memory[81] << 8);
+        uint16_t max_t = (uint16_t)memory[82] | ((uint16_t)memory[83] << 8);
+        if (min_t >= 150 && min_t <= 350 && max_t >= min_t && max_t <= 350) {
+            outData->min_temp = min_t;
+            outData->max_temp = max_t;
+        }
+    }
+
+    // Page 29 (offsets 100..103, 4 bytes): Bed temp min (uint16_t LE)
+    if (len >= 102) {
+        uint16_t bed_t = (uint16_t)memory[100] | ((uint16_t)memory[101] << 8);
+        if (bed_t >= 20 && bed_t <= 130) {
+            outData->bed_temp = bed_t;
+        }
+    }
+
+    // Page 30 (offsets 104..107, 4 bytes): Diameter (uint16_t LE)
+    if (len >= 106) {
+        uint16_t diam = (uint16_t)memory[104] | ((uint16_t)memory[105] << 8);
+        if (diam >= 100 && diam <= 300) {
+            outData->diameter = diam / 100.0f;
+        }
+    }
+
+    // Page 31 (offsets 108..111, 4 bytes): Weight in grams (uint16_t LE)
+    if (len >= 110) {
+        uint16_t w = (uint16_t)memory[108] | ((uint16_t)memory[109] << 8);
+        if (w >= 100 && w <= 5000) {
+            outData->total_weight = (float)w;
+            outData->remaining_weight = (float)w;
+        }
+    }
+
+    return true;
+}
+
 bool OpenSpoolParser::parseJsonPayload(const char* jsonStr, size_t len, OpenSpoolData* outData) {
     if (!jsonStr || len == 0 || !outData) return false;
+
+    if (isAnycubicPayload((const uint8_t*)jsonStr, len)) {
+        return parseAnycubicPayload((const uint8_t*)jsonStr, len, outData);
+    }
 
     // Detect UTF-16LE: e.g. '{' followed by 0x00
     char utf8Buf[512];
@@ -233,6 +381,13 @@ bool OpenSpoolParser::readFromTag(NFCConnectionI* conn, OpenSpoolData* outData) 
     }
     Serial.println();
 #endif
+
+    if (isAnycubicPayload(userMemory, pagesRead * 4)) {
+#ifndef NATIVE_TEST
+        Serial.println("OpenSpoolParser: Anycubic ACE binary tag detected");
+#endif
+        return parseAnycubicPayload(userMemory, pagesRead * 4, outData);
+    }
 
     return parseJsonPayload((const char*)userMemory, sizeof(userMemory), outData);
 }

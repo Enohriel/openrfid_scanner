@@ -1735,16 +1735,42 @@
                     optionalServices: [SERVICE_UUID]
                 });
 
-                log(`Connecting to ${bleDevice.name}...`);
-                bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
-                const server = await bleDevice.gatt.connect();
+                const deviceName = bleDevice.name || 'OpenPrintTag';
+                log(`Connecting to ${deviceName}...`);
 
-                log('Getting service...');
-                const service = await server.getPrimaryService(SERVICE_UUID);
+                let server = null;
+                let service = null;
+                const maxAttempts = 3;
+
+                for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                    try {
+                        if (attempt > 1) {
+                            log(`Connecting attempt ${attempt}/${maxAttempts}...`);
+                        }
+                        server = await bleDevice.gatt.connect();
+
+                        // Short settle delay for Windows WinRT Bluetooth GATT discovery
+                        await new Promise(r => setTimeout(r, 400));
+
+                        log('Discovering primary service...');
+                        service = await server.getPrimaryService(SERVICE_UUID);
+                        break;
+                    } catch (attemptErr) {
+                        log(`Attempt ${attempt} failed: ${attemptErr.message}`, 'warning');
+                        if (attempt === maxAttempts) {
+                            throw attemptErr;
+                        }
+                        await new Promise(r => setTimeout(r, 800));
+                    }
+                }
 
                 log('Getting characteristics...');
                 configWriteCharacteristic = await service.getCharacteristic(CONFIG_WRITE_UUID);
                 configReadCharacteristic = await service.getCharacteristic(CONFIG_READ_UUID);
+
+                // Register disconnect listener only once session is fully ready
+                bleDevice.removeEventListener('gattserverdisconnected', onDisconnected);
+                bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
 
                 log('Connection successful.', 'success');
 
@@ -1761,6 +1787,7 @@
 
             } catch (error) {
                 log(`Connection failed: ${error}`, 'error');
+                log('Note: If this device was paired previously in Windows, remove it from Windows "Settings > Bluetooth & devices" and retry.', 'warning');
             }
         }
 

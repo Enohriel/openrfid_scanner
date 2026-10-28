@@ -213,6 +213,80 @@ int test_real_spool_bin_parses_as_valid_spool() {
     return 0;
 }
 
+// Test: Anycubic ACE binary tag parses as valid spool and not blank tag
+int test_anycubic_ace_tag_parses_as_valid_spool() {
+    setup_nfc_test();
+
+    uint8_t anycubicUid[7] = {0x53, 0x2A, 0x4A, 0xAC, 0x95, 0x00, 0x01};
+    g_stubNfc->setTagPresent(true);
+    g_stubNfc->setTagUid(anycubicUid, 7);
+
+    uint8_t tagMemory[144] = {0};
+    // Page 4: Magic 7B 00 65 00
+    tagMemory[4 * 4 + 0] = 0x7B;
+    tagMemory[4 * 4 + 1] = 0x00;
+    tagMemory[4 * 4 + 2] = 0x65;
+    tagMemory[4 * 4 + 3] = 0x00;
+
+    // Pages 5..7: SKU "AHPEBK-102"
+    memcpy(&tagMemory[5 * 4], "AHPEBK-102", 10);
+
+    // Page 10: Brand "AC" (Anycubic)
+    memcpy(&tagMemory[10 * 4], "AC", 2);
+
+    // Page 15: Material "PETG"
+    memcpy(&tagMemory[15 * 4], "PETG", 4);
+
+    // Page 20: Color ABGR (Alpha=0xFF, B=0, G=0, R=0 -> Black)
+    tagMemory[20 * 4 + 0] = 0xFF;
+
+    // Page 24: Extruder temp min=230 (0x00E6), max=250 (0x00FA)
+    tagMemory[24 * 4 + 0] = 0xE6;
+    tagMemory[24 * 4 + 1] = 0x00;
+    tagMemory[24 * 4 + 2] = 0xFA;
+    tagMemory[24 * 4 + 3] = 0x00;
+
+    // Page 29: Bed temp min=70 (0x0046)
+    tagMemory[29 * 4 + 0] = 0x46;
+    tagMemory[29 * 4 + 1] = 0x00;
+
+    // Page 30: Diameter 175 (0x00AF)
+    tagMemory[30 * 4 + 0] = 0xAF;
+    tagMemory[30 * 4 + 1] = 0x00;
+
+    // Page 31: Weight 1000g (0x03E8)
+    tagMemory[31 * 4 + 0] = 0xE8;
+    tagMemory[31 * 4 + 1] = 0x03;
+
+    g_stubNfc->setTagData(tagMemory, sizeof(tagMemory));
+
+    bool parsed = NFCManager::getInstance().scanOnce();
+    TEST_ASSERT(parsed);
+
+    const auto& sent = ApplicationManager::getInstance().getSentMessages();
+    bool sawSpoolDetected = false;
+    bool sawBlankTag = false;
+    for (const auto& msg : sent) {
+        if (msg.type == AppMessageType::BLANK_TAG_DETECTED) {
+            sawBlankTag = true;
+        }
+        if (msg.type == AppMessageType::SPOOL_DETECTED) {
+            sawSpoolDetected = true;
+            TEST_ASSERT_EQ(strcmp(msg.payload.spoolDetected.spool_id, "532A4AAC950001"), 0);
+            TEST_ASSERT_EQ(msg.payload.spoolDetected.material_type, OPT_MATERIAL_TYPE_PETG);
+            TEST_ASSERT(nearlyEqual(msg.payload.spoolDetected.kg_remaining, 1.0f));
+            TEST_ASSERT_EQ(strcmp(msg.payload.spoolDetected.manufacturer, "Anycubic"), 0);
+            break;
+        }
+    }
+
+    TEST_ASSERT(sawSpoolDetected);
+    TEST_ASSERT(!sawBlankTag);
+
+    teardown_nfc_test();
+    return 0;
+}
+
 int main() {
     int passed = 0, failed = 0, total = 0;
 
@@ -222,6 +296,7 @@ int main() {
     RUN_TEST(test_read_error_not_formatted);
     RUN_TEST(test_blank_tag_removal_sends_tag_removed_message);
     RUN_TEST(test_real_spool_bin_parses_as_valid_spool);
+    RUN_TEST(test_anycubic_ace_tag_parses_as_valid_spool);
 
     printf("\n=== Results: %d/%d passed ===\n", passed, total);
 

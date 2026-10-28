@@ -8,14 +8,20 @@
 
 class OpenSpoolParser {
 public:
-    // Reads NTAG215 user pages, extracts and parses OpenSpool NDEF JSON
+    // Reads NTAG215 user pages, extracts and parses OpenSpool NDEF JSON or Anycubic ACE binary
     static bool readFromTag(NFCConnectionI* conn, OpenSpoolData* outData);
 
     // Formats and writes OpenSpoolData as a standard NDEF MIME JSON record to NTAG215
     static bool writeToTag(NFCConnectionI* conn, const OpenSpoolData* inData);
 
-    // Parses raw buffer containing NDEF / JSON into OpenSpoolData
+    // Parses raw buffer containing NDEF / JSON or Anycubic ACE binary into OpenSpoolData
     static bool parseJsonPayload(const char* jsonStr, size_t len, OpenSpoolData* outData);
+
+    // Checks if memory starts with Anycubic ACE magic header (0x7B, 0x00)
+    static bool isAnycubicPayload(const uint8_t* memory, size_t len);
+
+    // Parses raw Anycubic ACE memory blocks into OpenSpoolData
+    static bool parseAnycubicPayload(const uint8_t* memory, size_t len, OpenSpoolData* outData);
 
     // Serializes OpenSpoolData into a JSON string
     static size_t serializeJsonPayload(const OpenSpoolData* inData, char* outBuffer, size_t maxLen);
