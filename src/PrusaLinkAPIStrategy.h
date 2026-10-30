@@ -52,6 +52,7 @@ private:
     // Cache bgcode filament fetch (one attempt per job)
     int bgcodeFilamentJobId = -1;
     float bgcodeFilamentG = 0.0f;
+    unsigned long lastBgcodeFetchAttemptMs = 0;
 
     // Saved download ref for deferred bgcode fetch after print completes
     char savedDownloadRef[160] = {0};

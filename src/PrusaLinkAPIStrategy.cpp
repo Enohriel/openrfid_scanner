@@ -541,7 +541,8 @@ void PrusaLinkAPIStrategy::update() {
         if (totalFilamentG <= 0.0f && savedDownloadRef[0] != '\0') {
             if (jobId == bgcodeFilamentJobId && bgcodeFilamentG > 0.0f) {
                 totalFilamentG = bgcodeFilamentG;
-            } else if (bgcodeFilamentJobId != jobId) {
+            } else if (bgcodeFilamentJobId != jobId || (bgcodeFilamentG <= 0.0f && (millis() - lastBgcodeFetchAttemptMs >= 60000))) {
+                lastBgcodeFetchAttemptMs = millis();
                 // 1. Try PrusaLink Files API first (official endpoint with parsed metadata)
                 float fromFiles = fetchFilamentFromFilesApi(savedDownloadRef);
                 if (fromFiles > 0.0f) {
@@ -556,10 +557,12 @@ void PrusaLinkAPIStrategy::update() {
                     }
                     // 2. Fall back to reading file directly
                     float fromHeader = fetchFilamentFromBgcode(savedDownloadRef, savedFileSize);
-                    bgcodeFilamentJobId = jobId;
-                    bgcodeFilamentG = fromHeader;
                     if (fromHeader > 0.0f) {
+                        bgcodeFilamentJobId = jobId;
+                        bgcodeFilamentG = fromHeader;
                         totalFilamentG = fromHeader;
+                    } else {
+                        Serial.printf("PrusaLinkAPIStrategy: Could not fetch filament for job %d yet (will retry deferred)\n", jobId);
                     }
                 }
             }
@@ -751,7 +754,7 @@ float PrusaLinkAPIStrategy::fetchFilamentFromBgcode(const char* downloadRef, siz
             size_t totalBytesStreamed = magicRead;
             size_t lastYieldBytes = 0;
 
-            while (!st.done && millis() < streamDeadline && (millis() - lastDataMs < 5000)) {
+            while (!st.done && millis() < streamDeadline && (millis() - lastDataMs < 15000)) {
                 if (contentLength > 0 && totalBytesStreamed >= static_cast<size_t>(contentLength)) {
                     break;
                 }

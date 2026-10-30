@@ -87,7 +87,7 @@ void PrinterManager::poll() {
                 return;
             }
             if (st != nullptr &&
-                (strcmp(st, "STOPPED") == 0 || strcmp(st, "CANCELED") == 0 || strcmp(st, "ERROR") == 0)) {
+                (strcmp(st, "STOPPED") == 0 || strcmp(st, "CANCELED") == 0 || strcmp(st, "ERROR") == 0 || strcmp(st, "ATTENTION") == 0)) {
                 resolveAndSendJobEnd(currentJobId, lastProgressPercent, true, "stopped_or_error");
                 return;
             }
@@ -224,12 +224,12 @@ void PrinterManager::resolveAndSendJobEnd(int jobId, float progressPercent, bool
 void PrinterManager::handleJobDisappeared() {
     const char* lastState = strategy ? strategy->getJobState() : "";
     bool printerFinished = (lastState != nullptr && strcmp(lastState, "FINISHED") == 0);
-    bool printerCanceled = (lastState != nullptr &&
-        (strcmp(lastState, "STOPPED") == 0 || strcmp(lastState, "CANCELED") == 0 || strcmp(lastState, "ERROR") == 0));
 
     float progress = lastProgressPercent;
-    if (printerFinished || lastProgressPercent >= 95.0f || (!printerCanceled && lastProgressPercent <= 0.0f)) {
+    if (printerFinished || lastProgressPercent >= 95.0f) {
         progress = 100.0f;
+    } else if (lastProgressPercent <= 0.0f) {
+        progress = 0.0f;
     }
 
     Serial.printf("PrinterManager: Job %d disappeared at %.1f%% (printerState='%s') - treating as %s\n",

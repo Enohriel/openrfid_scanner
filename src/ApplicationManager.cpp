@@ -507,7 +507,7 @@ void ApplicationManager::handleBlankTagDetected(const AppMessage& msg) {
     }
 }
 
-void ApplicationManager::finishPrint(float gramsUsed, bool /*canceled*/) {
+void ApplicationManager::finishPrint(float gramsUsed, bool canceled) {
     if (spoolChangedDuringPrint) {
         Serial.println("ApplicationManager: Spool changed during print - not updating weight");
         if (lcdManager) {
@@ -525,8 +525,8 @@ void ApplicationManager::finishPrint(float gramsUsed, bool /*canceled*/) {
     }
 
     if (gramsUsed > 0) {
-        Serial.printf("ApplicationManager: Updating spool %s - removing %.2fg\n",
-            startingSpoolId, gramsUsed);
+        Serial.printf("ApplicationManager: Updating spool %s - removing %.2fg (%s)\n",
+            startingSpoolId, gramsUsed, canceled ? "canceled" : "finished");
 
         // Auto-update spool in SELF_DIRECTED mode
         if (automationMode == AutomationMode::SELF_DIRECTED) {
@@ -536,7 +536,7 @@ void ApplicationManager::finishPrint(float gramsUsed, bool /*canceled*/) {
                 if (lcdManager) {
                     lcdManager->resetHistory();
                     char line1[17];
-                    snprintf(line1, sizeof(line1), "Done: -%.1fg", gramsUsed);
+                    snprintf(line1, sizeof(line1), "%s: -%.1fg", canceled ? "Cancel" : "Done", gramsUsed);
                     lcdManager->updateScreen(line1, "Syncing Spoolman");
                 }
                 SpoolmanManager::getInstance().enqueueUseFilament(startingSpoolId, gramsUsed);
@@ -546,7 +546,7 @@ void ApplicationManager::finishPrint(float gramsUsed, bool /*canceled*/) {
             if (lcdManager) {
                 lcdManager->resetHistory();
                 char line1[17];
-                snprintf(line1, sizeof(line1), "Done: -%.1fg", gramsUsed);
+                snprintf(line1, sizeof(line1), "%s: -%.1fg", canceled ? "Cancel" : "Done", gramsUsed);
                 lcdManager->updateScreen(line1, "Present tag...");
             }
 
@@ -561,13 +561,14 @@ void ApplicationManager::finishPrint(float gramsUsed, bool /*canceled*/) {
             NFCManager::getInstance().enqueueWrite(request);
         } else {
             if (lcdManager) {
-                lcdManager->updateScreen("Print done", "HA controlled");
+                lcdManager->updateScreen(canceled ? "Print canceled" : "Print done", "HA controlled");
             }
         }
     } else {
-        Serial.println("ApplicationManager: No filament used - not updating spool");
+        Serial.printf("ApplicationManager: No filament used (%s) - not updating spool\n",
+            canceled ? "canceled" : "finished");
         if (lcdManager) {
-            lcdManager->updateScreen("Print done", "No filament used");
+            lcdManager->updateScreen(canceled ? "Print canceled" : "Print done", "No filament used");
         }
     }
 }
